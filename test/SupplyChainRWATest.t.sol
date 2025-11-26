@@ -9,7 +9,6 @@ import {SupplyChainRWA} from "src/SupplyChainRWA.sol";
 /// @notice Verifies the core state transitions and security invariants of the Supply Chain system.
 /// @dev Simulates the "Happy Path" (Success) and "Edge Cases" (Access Control) for the Hackathon Stagenet.
 contract SupplyChainTest is Test {
-    
     // --- System Under Test ---
     SupplyChainRWA supplyChain;
 
@@ -26,20 +25,20 @@ contract SupplyChainTest is Test {
         supplyChain.grantRole(supplyChain.MANUFACTURER_ROLE(), manufacturer);
     }
 
-    /// @dev Helper function to setup a valid shipment state. 
+    /// @dev Helper function to setup a valid shipment state.
     ///      Simulates: Minting raw materials -> Approving contract -> Creating Shipment.
     function createDummyShipment() public {
         vm.startPrank(supplier);
-        
+
         // 1. Supplier mints the raw materials (ERC1155)
         supplyChain.mint(supplier, 1, 100, "");
-        
+
         // 2. Supplier approves contract to hold goods in Escrow
         supplyChain.setApprovalForAll(address(supplyChain), true);
-        
+
         // 3. Supplier creates the shipment request
         supplyChain.createShipment(150, 100, 600, manufacturer, 1, 50);
-        
+
         vm.stopPrank();
     }
 
@@ -84,7 +83,7 @@ contract SupplyChainTest is Test {
     /// @dev Should revert with AccessControlUnauthorizedAccount error.
     function testOnlySupplierCanCreateShipment() public {
         address attacker = makeAddr("attacker");
-        
+
         vm.startPrank(attacker);
         vm.expectRevert(); // Expect transaction to fail
         supplyChain.createShipment(150, 100, 600, manufacturer, 1, 50);
@@ -101,9 +100,11 @@ contract SupplyChainTest is Test {
         vm.prank(supplier);
         supplyChain.startDelivery(0);
 
+        bytes memory checkData = abi.encode(0, int256(90), int256(90));
+
         // 3. Simulate Chainlink Automation (Check)
         // Should return true because status is IN_TRANSIT
-        (bool upkeepNeeded, bytes memory performData) = supplyChain.checkUpkeep("");
+        (bool upkeepNeeded, bytes memory performData) = supplyChain.checkUpkeep(checkData);
         assertTrue(upkeepNeeded, "Upkeep should be needed when shipment is in transit");
 
         // 4. Simulate Chainlink Automation (Perform)
@@ -115,10 +116,38 @@ contract SupplyChainTest is Test {
 
         // Status 2 = ARRIVED
         assertEq(uint256(status), 2, "Shipment status should be ARRIVED");
-        
+
         // 6. Verify Asset Transfer (Escrow Release)
         // Manufacturer should now have the 50 tokens
         uint256 manufacturerBalance = supplyChain.balanceOf(manufacturer, 1);
         assertEq(manufacturerBalance, 50, "Manufacturer should receive the tokens");
+    }
+
+    function testCannotFufillOrderOutsideGeofence() public {
+        createDummyShipment();
+        vm.startPrank(supplier);
+        supplyChain.startDelivery(0);
+
+        bytes memory badData = abi.encode(0, int256(1000), int256(1000));
+        supplyChain.performUpkeep(badData);
+
+        (,,,,,, SupplyChainRWA.ShipmentStatus status) = supplyChain.shipments(0);
+        assertEq(uint256(status), uint256(SupplyChainRWA.ShipmentStatus.IN_TRANSIT));
+
+        assertEq(supplyChain.balanceOf(manufacturer, 1), 0);
+    }
+
+    function testFullfillInsideGeofence() public {
+        createDummyShipment();
+        vm.startPrank(supplier);
+        supplyChain.startDelivery(0);
+
+        bytes memory goodData = abi.encode(0, int256(90), int256(90));
+        supplyChain.performUpkeep(goodData);
+
+        (,,,,,, SupplyChainRWA.ShipmentStatus status) = supplyChain.shipments(0);
+        assertEq(uint256(status), uint256(SupplyChainRWA.ShipmentStatus.ARRIVED));
+
+        assertEq(supplyChain.balanceOf(manufacturer, 1), 50);
     }
 }
