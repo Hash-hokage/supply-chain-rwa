@@ -2,9 +2,9 @@
 
 pragma solidity ^0.8.20;
 
- /*//////////////////////////////////////////////////////////////
-                                IMPORTS
- //////////////////////////////////////////////////////////////*/
+/*//////////////////////////////////////////////////////////////
+                               IMPORTS
+//////////////////////////////////////////////////////////////*/
 
 import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
@@ -14,28 +14,27 @@ import {
     AutomationCompatibleInterface
 } from "@chainlink/contracts/src/v0.8/automation/interfaces/AutomationCompatibleInterface.sol";
 
-/** 
-* @title RWA Supply Chain Orchestrator
-* @author Omisade Olamiposi
-* @notice Manages the life cycle of Real World Assets(RWA) from raw material sourcing to final delivery.
-* @dev Implements a hybrid Chainlink architecture:
-*       1. Automation: Monitors shipments in transit.
-*       2. Functions(planned): Verifies IoT GPS/Temprature data before state transitions.
-*       3. ERC1155: Represents batch raw materials.
-*/
+/**
+ * @title RWA Supply Chain Orchestrator
+ * @author Omisade Olamiposi
+ * @notice Manages the life cycle of Real World Assets(RWA) from raw material sourcing to final delivery.
+ * @dev Implements a hybrid Chainlink architecture:
+ *       1. Automation: Monitors shipments in transit.
+ *       2. Functions(planned): Verifies IoT GPS/Temprature data before state transitions.
+ *       3. ERC1155: Represents batch raw materials.
+ */
 
 contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationCompatibleInterface {
-
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Thrown when an operation is attempted on a shipment not currently moving.    
+    /// @notice Thrown when an operation is attempted on a shipment not currently moving.
     error SupplyChainRWA__shipmentNotInTransit();
     /// @notice Thrown when an operation is attempted on a shipment that has not been created.
     error SupplyChainRWA__shipmentNotCreated();
 
-     /*//////////////////////////////////////////////////////////////
+    /*//////////////////////////////////////////////////////////////
                                  ROLES
     //////////////////////////////////////////////////////////////*/
 
@@ -53,7 +52,6 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
         ARRIVED // Arrived at destination.
     }
 
-
     /// @notice Defines the parameters of a physical shipment.
     /// @dev Uses int256 for coordinates to handle negative values (South/West).
     struct Shipment {
@@ -65,18 +63,17 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
         // --- Asset Data ---
         address manufacturer; // The Intended receipient.
         uint256 rawMaterialId; // The ERC1155 token Id.
-        uint256 amount; // quantity of token 
+        uint256 amount; // quantity of token
 
         // --- System State ---
         ShipmentStatus status;
     }
 
     /// @notice Registry of all shipments tracked by the protocol.
-    mapping(uint256 => Shipment) public shipments;
+    mapping(uint256 shipmentId => Shipment) public shipments;
 
     /// @notice Counter to generate unique Shipment IDs.
     uint256 public shipmentCounter;
-
 
     /*//////////////////////////////////////////////////////////////
                                FUNCTIONS
@@ -88,28 +85,28 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
     }
 
-    /** 
-    * @notice Mints new raw material tokens.
-    * @dev Only callable by verified Suppliers.
-    * @param account The address receiving the tokens.
-    * @param id The token ID type.
-    * @param amount The quantity to mint.
-    * @param data Additional data for hooks
-    */
-     function mint(address account, uint256 id, uint256 amount, bytes memory data) public onlyRole(SUPPLIER_ROLE) {
+    /**
+     * @notice Mints new raw material tokens.
+     * @dev Only callable by verified Suppliers.
+     * @param account The address receiving the tokens.
+     * @param id The token ID type.
+     * @param amount The quantity to mint.
+     * @param data Additional data for hooks
+     */
+    function mint(address account, uint256 id, uint256 amount, bytes memory data) public onlyRole(SUPPLIER_ROLE) {
         _mint(account, id, amount, data);
     }
 
-    /** 
-    * @notice Locks raw materials and initializes a shipment request.
-    * @dev Transfers ERC1155 tokens from Supplier to this Contract (Escrow).
-    * @param destLat Destination Latitude (e.g. 6.5244 * 10^6).
-    * @param destLong Destination Longitude.
-    * @param radius Allowed error margin for GPS delivery.
-    * @param manufacturer The address of the receiver.
-    * @param rawMaterialId The token ID being shipped.
-    * @param amount The quantity being shipped.
-    */
+    /**
+     * @notice Locks raw materials and initializes a shipment request.
+     * @dev Transfers ERC1155 tokens from Supplier to this Contract (Escrow).
+     * @param destLat Destination Latitude (e.g. 6.5244 * 10^6).
+     * @param destLong Destination Longitude.
+     * @param radius Allowed error margin for GPS delivery.
+     * @param manufacturer The address of the receiver.
+     * @param rawMaterialId The token ID being shipped.
+     * @param amount The quantity being shipped.
+     */
     function createShipment(
         int256 destLat,
         int256 destLong,
@@ -151,14 +148,12 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
     //////////////////////////////////////////////////////////////*/
 
     /**
-    * @notice Chainlink Automation: Checks if any shipment needs an update.
-    * @dev Scans open shipments. If IN_TRANSIT, triggers performUpkeep.
-    * @return upkeepNeeded True if a shipment is moving.
-    * @return performData Encoded ID of the shipment to check.
-    */
-    function checkUpkeep(
-        bytes calldata /* checkData */
-    )
+     * @notice Chainlink Automation: Checks if any shipment needs an update.
+     * @dev Scans open shipments. If IN_TRANSIT, calculates if its in geoFence and triggers performUpkeep.
+     * @return upkeepNeeded True if a shipment is moving and within geoFence.
+     * @return performData Encoded ID of the shipment to check.
+     */
+    function checkUpkeep(bytes calldata checkData)
         external
         view
         returns (
@@ -166,42 +161,61 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
             bytes memory /* performData */
         )
     {
+         if (checkData.length == 0) {
+            return (false, "No upkeep needed.");
+        }
+
+        // Decodes the current location from the oracle.
+        (int256 currentLat, int256 currentLong) = abi.decode(checkData, (int256, int256));
+
         for (uint256 i = 0; i < shipmentCounter; i++) {
             Shipment storage shipment = shipments[i];
 
             if (shipment.status == ShipmentStatus.IN_TRANSIT) {
-                upkeepNeeded = true;
-                return (true, abi.encode(i));
+                int256 diffLat = currentLat - shipment.destLat;
+                int256 diffLong = currentLong - shipment.destLong;
+                uint256 squaredDistance = uint256((diffLong * diffLong) + (diffLat * diffLat));
+
+                if (squaredDistance <= (shipment.radius * shipment.radius)) {
+                    // We pass the ID *AND* the location to performUpkeep
+                    return (true, abi.encode(i, currentLat, currentLong));
+                }
             }
         }
         return (false, "");
     }
 
     /**
-    * @notice Chainlink Automation: Executes the state change.
-    * @dev CURRENTLY: Auto-arrives the shipment (for testing).
-    * @custom:todo INTEGRATION: This function should trigger a Chainlink Function Request
-    *              to verify GPS coordinates before marking as ARRIVED.
-    */
+     * @notice Chainlink Automation: Executes the state change.
+     * @dev CURRENTLY: Auto-arrives the shipment (for testing).
+     * @custom:todo INTEGRATION: This function should trigger a Chainlink Function Request
+     *              to verify GPS coordinates before marking as ARRIVED.
+     */
     function performUpkeep(bytes calldata performData) external {
-        uint256 shipmentId = abi.decode(performData, (uint256));
+        (uint256 shipmentId, int256 currentLat, int256 currentLong) = abi.decode(performData, (uint256, int256, int256));
         Shipment storage shipment = shipments[shipmentId];
 
         if (shipment.status != ShipmentStatus.IN_TRANSIT) {
             revert SupplyChainRWA__shipmentNotInTransit();
         }
 
-        // --- SIMULATED ARRIVAL (Placeholder for IoT verification) ---
-        shipment.status = ShipmentStatus.ARRIVED;
+        if (shipment.status == ShipmentStatus.IN_TRANSIT) {
+            int256 diffLat = currentLat - shipment.destLat;
+            int256 diffLong = currentLong - shipment.destLong;
+            uint256 squaredDistance = uint256((diffLong * diffLong) + (diffLat * diffLat));
 
-        // Release assets from Escrow to Manufacturer
-        _safeTransferFrom(address(this), shipment.manufacturer, shipment.rawMaterialId, shipment.amount, "");
+            if (squaredDistance <= (shipment.radius * shipment.radius)) {
+                shipment.status = ShipmentStatus.ARRIVED;
+                // Release assets from Escrow to Manufacturer
+                _safeTransferFrom(address(this), shipment.manufacturer, shipment.rawMaterialId, shipment.amount, "");
+            }
+        }
     }
 
     /**
-    * @notice Converts raw materials into a final product (ERC721).
-    * @custom:todo Implement manufacturing logic (burn ERC1155 -> mint ERC721).
-    */
+     * @notice Converts raw materials into a final product (ERC721).
+     * @custom:todo Implement manufacturing logic (burn ERC1155 -> mint ERC721).
+     */
     function assembleProduct() external onlyRole(MANUFACTURER_ROLE) {}
 
     // ==========================================
