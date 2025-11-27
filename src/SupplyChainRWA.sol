@@ -13,7 +13,7 @@ import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {
     AutomationCompatibleInterface
 } from "@chainlink/contracts/src/v0.8/automation/interfaces/AutomationCompatibleInterface.sol";
-
+import {IProductNft} from "src/IProduct.sol";
 /**
  * @title RWA Supply Chain Orchestrator
  * @author Omisade Olamiposi
@@ -81,8 +81,9 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
 
     /// @notice Sets up the governance roles.
     /// @param uri The metadata URI for the ERC1155 tokens.
-    constructor(string memory uri) ERC1155(uri) {
+    constructor(string memory uri, address nftAddress) ERC1155(uri) {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        productNft = IProductNft(nftAddress);
     }
 
     /**
@@ -161,7 +162,7 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
             bytes memory /* performData */
         )
     {
-         if (checkData.length == 0) {
+        if (checkData.length == 0) {
             return (false, "No upkeep needed.");
         }
 
@@ -212,8 +213,6 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
         }
     }
 
-   
-
     // ==========================================
     // 🔧 OVERRIDES
     // ==========================================
@@ -227,36 +226,51 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
         return super.supportsInterface(interfaceId);
     }
 
-
-
-        /*//////////////////////////////////////////////////////////////
+    /*//////////////////////////////////////////////////////////////
                                MANUFACTURING LOGIC
     //////////////////////////////////////////////////////////////*/
-     /**
+    /**
      * @notice Converts raw materials into a final product (ERC721).
      * @custom:todo Implement manufacturing logic (burn ERC1155 -> mint ERC721).
+     *
      */
+
+    mapping(uint256 => uint256) public productToShipment; //This links a finished product NFT to the shipment of raw materials used.
+    mapping(uint256 => uint256[]) public productToRawMaterial; //This connects a product to the raw materials used.
+
     event ProductAssembled(uint256 shipmentId, address manufacturer, uint256 quantity);
 
-   
     modifier onlyArrived(uint256 shipmentId) {
         _shipmentArrived(shipmentId);
         _;
     }
 
-   
-    
-    function _shipmentArrived(uint256 shipmentId) internal {
+    function _shipmentArrived(uint256 shipmentId) internal view {
         require(shipments[shipmentId].status == ShipmentStatus.ARRIVED, "Shipment not arrived");
     }
+    //interface
+    IProductNft public productNft;
 
-    function assembleProduct(uint256 shipmentId) external onlyRole(MANUFACTURER_ROLE) shipmentExists(shipmentID) onlyArrived(shipmentId) {
+    //asssemble function
+    function assembleProduct(uint256 shipmentId, string[] calldata metadataURIs)
+        external
+        onlyRole(MANUFACTURER_ROLE)
+        onlyArrived(shipmentId)
+    {
+        Shipment memory shipment = shipments[shipmentId];
         uint256 rawId = shipment.rawMaterialId;
         uint256 amount = shipment.amount;
         _burn(msg.sender, rawId, amount);
 
+        for (uint256 i = 0; i < amount; i++) {
+            uint256 newProductId = productNft.mintProductNft(msg.sender, metadataURIs[i]);
+
+            productToShipment[newProductId] = shipmentId;
+            productToShipment[newProductId] = shipmentId;
+            productToRawMaterial[newProductId].push(shipment.rawMaterialId);
+        }
+
+        emit ProductAssembled(shipmentId, msg.sender, amount);
     }
-
-
 }
 
