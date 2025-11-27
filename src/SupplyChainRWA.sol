@@ -212,11 +212,7 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
         }
     }
 
-    /**
-     * @notice Converts raw materials into a final product (ERC721).
-     * @custom:todo Implement manufacturing logic (burn ERC1155 -> mint ERC721).
-     */
-    function assembleProduct() external onlyRole(MANUFACTURER_ROLE) {}
+   
 
     // ==========================================
     // 🔧 OVERRIDES
@@ -230,5 +226,37 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
     {
         return super.supportsInterface(interfaceId);
     }
+
+
+
+        /*//////////////////////////////////////////////////////////////
+                               MANUFACTURING LOGIC
+    //////////////////////////////////////////////////////////////*/
+     /**
+     * @notice Converts raw materials into a final product (ERC721).
+     * @custom:todo Implement manufacturing logic (burn ERC1155 -> mint ERC721).
+     */
+    event ProductAssembled(uint256 shipmentId, address manufacturer, uint256 quantity);
+
+   
+    modifier onlyArrived(uint256 shipmentId) {
+        _shipmentArrived(shipmentId);
+        _;
+    }
+
+   
+    
+    function _shipmentArrived(uint256 shipmentId) internal {
+        require(shipments[shipmentId].status == ShipmentStatus.ARRIVED, "Shipment not arrived");
+    }
+
+    function assembleProduct(uint256 shipmentId) external onlyRole(MANUFACTURER_ROLE) shipmentExists(shipmentID) onlyArrived(shipmentId) {
+        uint256 rawId = shipment.rawMaterialId;
+        uint256 amount = shipment.amount;
+        _burn(msg.sender, rawId, amount);
+
+    }
+
+
 }
 
