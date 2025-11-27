@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {SupplyChainRWA} from "src/SupplyChainRWA.sol";
+import {ProductNft} from "src/ProductNft.sol";
 
 /// @title Integration Tests for SupplyChainRWA
 /// @author Omisade Olamiposi
@@ -11,6 +12,7 @@ import {SupplyChainRWA} from "src/SupplyChainRWA.sol";
 contract SupplyChainTest is Test {
     // --- System Under Test ---
     SupplyChainRWA supplyChain;
+    ProductNft productNft = new ProductNft();
 
     // --- Actors ---
     address supplier = makeAddr("supplier");
@@ -18,7 +20,7 @@ contract SupplyChainTest is Test {
 
     /// @notice Deploys the contract and configures the RBAC (Role Based Access Control).
     function setUp() public {
-        supplyChain = new SupplyChainRWA("");
+        supplyChain = new SupplyChainRWA("", address(productNft));
 
         // Grant system roles to test actors
         supplyChain.grantRole(supplyChain.SUPPLIER_ROLE(), supplier);
