@@ -241,9 +241,7 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
     mapping(uint256 => uint256) public productToShipment; //This links a finished product NFT to the shipment of raw materials used.
     mapping(uint256 => uint256[]) public productToRawMaterial; //This connects a product to the raw materials used.
     mapping(uint256 => uint256) public productAssemblyTimestamp; // timestamp when each product NFT was assembled (for metadata)
-    mapping(uint256 => bool) public shipmentConsumed;// Tracks whether a shipment has already been used for manufacturing
-    
-
+    mapping(uint256 => bool) public shipmentConsumed; // Tracks whether a shipment has already been used for manufacturing
 
     event ProductAssembled(uint256 shipmentId, address manufacturer, uint256 quantity);
 
@@ -260,12 +258,7 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
 
     //asssemble function
 
-   
-
-    function assembleProduct(
-        uint256 shipmentId,
-        string[] calldata metadataURIs
-    )
+    function assembleProduct(uint256 shipmentId, string[] calldata metadataURIs)
         external
         onlyRole(MANUFACTURER_ROLE)
         onlyArrived(shipmentId)
@@ -277,23 +270,17 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
         // is allowed to assemble products from it
         require(msg.sender == shipment.manufacturer, "Not authorized manufacturer");
 
-        uint256 rawId = shipment.rawMaterialId;   // The raw material type used
-        uint256 amount = shipment.amount;         // How many raw units shipped
+        uint256 rawId = shipment.rawMaterialId; // The raw material type used
+        uint256 amount = shipment.amount; // How many raw units shipped
 
         // Prevent re-using the same shipment twice for manufacturing
         require(!shipmentConsumed[shipmentId], "Shipment already used");
-        
+
         // Ensure manufacturer actually owns the raw materials being consumed
-        require(
-            balanceOf(msg.sender, rawId) >= amount,
-            "Not enough raw materials"
-        );
+        require(balanceOf(msg.sender, rawId) >= amount, "Not enough raw materials");
 
         // Each unit being manufactured must have one metadata URI
-        require(
-            metadataURIs.length == amount,
-            "Metadata list must match raw material amount"
-        );
+        require(metadataURIs.length == amount, "Metadata list must match raw material amount");
 
         // Mark this shipment as used so it cannot be assembled again
         shipmentConsumed[shipmentId] = true;
@@ -304,12 +291,8 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
 
         // Mint a new product NFT for each raw material unit
         for (uint256 i = 0; i < amount; i++) {
-            
             // Mint product NFT to the manufacturer with its specific metadata URI
-            uint256 newProductId = productNft.mintProductNft(
-                msg.sender,
-                metadataURIs[i]
-            );
+            uint256 newProductId = productNft.mintProductNft(msg.sender, metadataURIs[i]);
 
             // Link product → shipment, enabling traceability
             productToShipment[newProductId] = shipmentId;
@@ -324,6 +307,100 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
         emit ProductAssembled(shipmentId, msg.sender, amount);
     }
 
+    /**
+     * @notice Build JSON metadata for a product (human readable provenance).
+     * @dev This returns raw JSON string (not base64). ProductNft.tokenURI will encode it.
+     */
+    function buildMetadata(uint256 productId) public view returns (string memory) {
+        // gather basic data
+        uint256 shipmentId = productToShipment[productId];
+        uint256[] memory rawMaterials = productToRawMaterial[productId];
+        uint256 assembledAt = productAssemblyTimestamp[productId];
 
+        // fetch shipment info (guard zero/shipment exist)
+        Shipment memory s;
+        if (shipmentId < shipmentCounter) {
+            s = shipments[shipmentId];
+        }
+
+        // build attributes array textually
+        string memory attrs = string(
+            abi.encodePacked(
+                '{"trait_type":"shipmentId","value":"',
+                Strings.toString(shipmentId),
+                '"},',
+                '{"trait_type":"rawMaterialId","value":"',
+                rawMaterials.length > 0 ? Strings.toString(rawMaterials[0]) : "0",
+                '"},',
+                '{"trait_type":"manufacturer","value":"',
+                toAsciiString(s.manufacturer),
+                '"},',
+                '{"trait_type":"assembledAt","value":"',
+                Strings.toString(assembledAt),
+                '"}'
+            )
+        );
+
+        // description text composed from parts
+        string memory description = string(
+            abi.encodePacked(
+                "Product assembled from raw material batch #",
+                rawMaterials.length > 0 ? Strings.toString(rawMaterials[0]) : "0",
+                " (shipment #",
+                Strings.toString(shipmentId),
+                ") by ",
+                toAsciiString(s.manufacturer),
+                " on ",
+                Strings.toString(assembledAt)
+            )
+        );
+
+        // build final JSON
+        string memory json = string(
+            abi.encodePacked(
+                '{"name":"Product #',
+                Strings.toString(productId),
+                '",',
+                '"description":"',
+                description,
+                '",',
+                '"attributes":[',
+                attrs,
+                "]}"
+            )
+        );
+
+        return json;
+    }
+
+    //helper to convert address to string
+    /// @dev helper to convert address to string (0x...)
+    function toAsciiString(address x) internal pure returns (string memory) {
+        bytes memory s = new bytes(42);
+        bytes memory hexChars = "0123456789abcdef";
+        s[0] = "0";
+        s[1] = "x";
+        uint256 u = uint256(uint160(x));
+        for (uint256 i = 0; i < 20; i++) {
+            s[2 + i * 2] = hexChars[(u >> (8 * (19 - i) + 4)) & 0xf];
+            s[3 + i * 2] = hexChars[(u >> (8 * (19 - i))) & 0xf];
+        }
+        return string(s);
+    }
+
+    function tokenURI(uint256 tokenId) public view override returns (string memory) {
+        // if explicit URI stored (backwards compat), return it
+        string memory stored = s_tokenIdToUri[tokenId];
+        if (bytes(stored).length != 0) {
+            return stored;
+        }
+
+        // otherwise, ask SupplyChain for a JSON metadata string
+        string memory json = ISupplyChain(supplyChain).buildMetadata(tokenId);
+
+        // base64 encode and return data URI
+        string memory encoded = Base64.encode(bytes(json));
+        return string(abi.encodePacked("data:application/json;base64,", encoded));
+    }
 }
 
