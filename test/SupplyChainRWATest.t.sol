@@ -7,12 +7,14 @@ import {ProductNft} from "src/ProductNft.sol";
 
 contract SupplyChainTest is Test {
     // --- System Under Test ---
-    SupplyChainRWA supplyChain;
-    ProductNft productNft = new ProductNft();
+
+    SupplyChainRWA supplyChain = new SupplyChainRWA("uri", address(0)); // deploy SupplyChain first
+    ProductNft productNft = new ProductNft(address(supplyChain)); // pass the SupplyChain address
 
     // --- Actors ---
     address supplier = makeAddr("supplier");
     address manufacturer = makeAddr("manufacturer");
+    address otherUser = makeAddr("otherUser");
 
     // --- Mocks ---
     address router = makeAddr("router"); // Mock Chainlink Router
@@ -110,4 +112,6 @@ contract SupplyChainTest is Test {
         (uint256 id) = abi.decode(performData, (uint256));
         assertEq(id, 0);
     }
+
+    ///MANUFACTURING LOGIC TESTS
 }
