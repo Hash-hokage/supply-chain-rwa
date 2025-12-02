@@ -11,12 +11,14 @@ import {ProductNft} from "src/ProductNft.sol";
 /// @dev Simulates the "Happy Path" (Success) and "Edge Cases" (Access Control) for the Hackathon Stagenet.
 contract SupplyChainTest is Test {
     // --- System Under Test ---
-    SupplyChainRWA supplyChain;
-    ProductNft productNft = new ProductNft();
+
+    SupplyChainRWA supplyChain = new SupplyChainRWA("uri", address(0)); // deploy SupplyChain first
+    ProductNft productNft = new ProductNft(address(supplyChain)); // pass the SupplyChain address
 
     // --- Actors ---
     address supplier = makeAddr("supplier");
     address manufacturer = makeAddr("manufacturer");
+    address otherUser = makeAddr("otherUser");
 
     /// @notice Deploys the contract and configures the RBAC (Role Based Access Control).
     function setUp() public {
@@ -152,4 +154,6 @@ contract SupplyChainTest is Test {
 
         assertEq(supplyChain.balanceOf(manufacturer, 1), 50);
     }
+
+    ///MANUFACTURING LOGIC TESTS
 }

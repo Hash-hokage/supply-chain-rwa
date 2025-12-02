@@ -312,25 +312,19 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
      * @dev This returns raw JSON string (not base64). ProductNft.tokenURI will encode it.
      */
     function buildMetadata(uint256 productId) public view returns (string memory) {
-        // gather basic data
         uint256 shipmentId = productToShipment[productId];
-        uint256[] memory rawMaterials = productToRawMaterial[productId];
+        uint256[] memory raws = productToRawMaterial[productId];
         uint256 assembledAt = productAssemblyTimestamp[productId];
 
-        // fetch shipment info (guard zero/shipment exist)
-        Shipment memory s;
-        if (shipmentId < shipmentCounter) {
-            s = shipments[shipmentId];
-        }
+        Shipment memory s = shipments[shipmentId];
 
-        // build attributes array textually
         string memory attrs = string(
             abi.encodePacked(
                 '{"trait_type":"shipmentId","value":"',
                 Strings.toString(shipmentId),
                 '"},',
                 '{"trait_type":"rawMaterialId","value":"',
-                rawMaterials.length > 0 ? Strings.toString(rawMaterials[0]) : "0",
+                (raws.length > 0 ? Strings.toString(raws[0]) : "0"),
                 '"},',
                 '{"trait_type":"manufacturer","value":"',
                 toAsciiString(s.manufacturer),
@@ -341,11 +335,10 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
             )
         );
 
-        // description text composed from parts
         string memory description = string(
             abi.encodePacked(
                 "Product assembled from raw material batch #",
-                rawMaterials.length > 0 ? Strings.toString(rawMaterials[0]) : "0",
+                (raws.length > 0 ? Strings.toString(raws[0]) : "0"),
                 " (shipment #",
                 Strings.toString(shipmentId),
                 ") by ",
@@ -355,22 +348,17 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
             )
         );
 
-        // build final JSON
-        string memory json = string(
+        return string(
             abi.encodePacked(
                 '{"name":"Product #',
                 Strings.toString(productId),
-                '",',
-                '"description":"',
+                '", "description":"',
                 description,
-                '",',
-                '"attributes":[',
+                '", "attributes":[',
                 attrs,
                 "]}"
             )
         );
-
-        return json;
     }
 
     //helper to convert address to string
@@ -378,29 +366,18 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
     function toAsciiString(address x) internal pure returns (string memory) {
         bytes memory s = new bytes(42);
         bytes memory hexChars = "0123456789abcdef";
+
         s[0] = "0";
         s[1] = "x";
+
         uint256 u = uint256(uint160(x));
+
         for (uint256 i = 0; i < 20; i++) {
             s[2 + i * 2] = hexChars[(u >> (8 * (19 - i) + 4)) & 0xf];
             s[3 + i * 2] = hexChars[(u >> (8 * (19 - i))) & 0xf];
         }
+
         return string(s);
-    }
-
-    function tokenURI(uint256 tokenId) public view override returns (string memory) {
-        // if explicit URI stored (backwards compat), return it
-        string memory stored = s_tokenIdToUri[tokenId];
-        if (bytes(stored).length != 0) {
-            return stored;
-        }
-
-        // otherwise, ask SupplyChain for a JSON metadata string
-        string memory json = ISupplyChain(supplyChain).buildMetadata(tokenId);
-
-        // base64 encode and return data URI
-        string memory encoded = Base64.encode(bytes(json));
-        return string(abi.encodePacked("data:application/json;base64,", encoded));
     }
 }
 
