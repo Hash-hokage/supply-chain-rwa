@@ -8,6 +8,9 @@ pragma solidity ^0.8.20;
 
 import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+import {Base64} from "@openzeppelin/contracts/utils/Base64.sol";
+
 import {ERC1155Holder} from "@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol";
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {
@@ -237,6 +240,8 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
 
     mapping(uint256 => uint256) public productToShipment; //This links a finished product NFT to the shipment of raw materials used.
     mapping(uint256 => uint256[]) public productToRawMaterial; //This connects a product to the raw materials used.
+    mapping(uint256 => uint256) public productAssemblyTimestamp; // timestamp when each product NFT was assembled (for metadata)
+    mapping(uint256 => bool) public shipmentConsumed; // Tracks whether a shipment has already been used for manufacturing
 
     event ProductAssembled(uint256 shipmentId, address manufacturer, uint256 quantity);
 
@@ -252,25 +257,127 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
     IProductNft public productNft;
 
     //asssemble function
+
     function assembleProduct(uint256 shipmentId, string[] calldata metadataURIs)
         external
         onlyRole(MANUFACTURER_ROLE)
         onlyArrived(shipmentId)
     {
+        // Load shipment details into memory for use in the function
         Shipment memory shipment = shipments[shipmentId];
-        uint256 rawId = shipment.rawMaterialId;
-        uint256 amount = shipment.amount;
+
+        // Ensures only the manufacturer assigned to this shipment
+        // is allowed to assemble products from it
+        require(msg.sender == shipment.manufacturer, "Not authorized manufacturer");
+
+        uint256 rawId = shipment.rawMaterialId; // The raw material type used
+        uint256 amount = shipment.amount; // How many raw units shipped
+
+        // Prevent re-using the same shipment twice for manufacturing
+        require(!shipmentConsumed[shipmentId], "Shipment already used");
+
+        // Ensure manufacturer actually owns the raw materials being consumed
+        require(balanceOf(msg.sender, rawId) >= amount, "Not enough raw materials");
+
+        // Each unit being manufactured must have one metadata URI
+        require(metadataURIs.length == amount, "Metadata list must match raw material amount");
+
+        // Mark this shipment as used so it cannot be assembled again
+        shipmentConsumed[shipmentId] = true;
+
+        // Burn all raw materials used in this assembly step
+        // This ensures 1-to-1 conversion: raw → product
         _burn(msg.sender, rawId, amount);
 
+        // Mint a new product NFT for each raw material unit
         for (uint256 i = 0; i < amount; i++) {
+            // Mint product NFT to the manufacturer with its specific metadata URI
             uint256 newProductId = productNft.mintProductNft(msg.sender, metadataURIs[i]);
 
+            // Link product → shipment, enabling traceability
             productToShipment[newProductId] = shipmentId;
-            productToShipment[newProductId] = shipmentId;
-            productToRawMaterial[newProductId].push(shipment.rawMaterialId);
+
+            // Track which raw material type was used to produce this product
+            productToRawMaterial[newProductId].push(rawId);
+            // Record the assembly timestamp for provenance
+            productAssemblyTimestamp[newProductId] = block.timestamp;
         }
 
+        // Emit event for audit trails and off-chain indexing
         emit ProductAssembled(shipmentId, msg.sender, amount);
+    }
+
+    /**
+     * @notice Build JSON metadata for a product (human readable provenance).
+     * @dev This returns raw JSON string (not base64). ProductNft.tokenURI will encode it.
+     */
+    function buildMetadata(uint256 productId) public view returns (string memory) {
+        uint256 shipmentId = productToShipment[productId];
+        uint256[] memory raws = productToRawMaterial[productId];
+        uint256 assembledAt = productAssemblyTimestamp[productId];
+
+        Shipment memory s = shipments[shipmentId];
+
+        string memory attrs = string(
+            abi.encodePacked(
+                '{"trait_type":"shipmentId","value":"',
+                Strings.toString(shipmentId),
+                '"},',
+                '{"trait_type":"rawMaterialId","value":"',
+                (raws.length > 0 ? Strings.toString(raws[0]) : "0"),
+                '"},',
+                '{"trait_type":"manufacturer","value":"',
+                toAsciiString(s.manufacturer),
+                '"},',
+                '{"trait_type":"assembledAt","value":"',
+                Strings.toString(assembledAt),
+                '"}'
+            )
+        );
+
+        string memory description = string(
+            abi.encodePacked(
+                "Product assembled from raw material batch #",
+                (raws.length > 0 ? Strings.toString(raws[0]) : "0"),
+                " (shipment #",
+                Strings.toString(shipmentId),
+                ") by ",
+                toAsciiString(s.manufacturer),
+                " on ",
+                Strings.toString(assembledAt)
+            )
+        );
+
+        return string(
+            abi.encodePacked(
+                '{"name":"Product #',
+                Strings.toString(productId),
+                '", "description":"',
+                description,
+                '", "attributes":[',
+                attrs,
+                "]}"
+            )
+        );
+    }
+
+    //helper to convert address to string
+    /// @dev helper to convert address to string (0x...)
+    function toAsciiString(address x) internal pure returns (string memory) {
+        bytes memory s = new bytes(42);
+        bytes memory hexChars = "0123456789abcdef";
+
+        s[0] = "0";
+        s[1] = "x";
+
+        uint256 u = uint256(uint160(x));
+
+        for (uint256 i = 0; i < 20; i++) {
+            s[2 + i * 2] = hexChars[(u >> (8 * (19 - i) + 4)) & 0xf];
+            s[3 + i * 2] = hexChars[(u >> (8 * (19 - i))) & 0xf];
+        }
+
+        return string(s);
     }
 }
 
