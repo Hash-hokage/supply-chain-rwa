@@ -90,6 +90,8 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
     mapping(uint256 shipmentId => Shipment) public shipments;
     mapping(uint256 => uint256) public productToShipment; //This links a finished product NFT to the shipment of raw materials used.
     mapping(uint256 => uint256[]) public productToRawMaterial; //This connects a product to the raw materials used.
+    mapping(uint256 => uint256) public productAssemblyTimestamp; // timestamp when each product NFT was assembled (for metadata)
+    mapping(uint256 => bool) public shipmentConsumed; // Tracks whether a shipment has already been used for manufacturing
     mapping(bytes32 requestId => uint256 shipmentId) public requestIdToShipment;
 
     /// @notice Counter to generate unique Shipment IDs.
@@ -255,8 +257,15 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
         requestIdToShipment[requestId] = shipmentId;
     }
 
-    function fulfillRequest(bytes32 requestId, bytes memory response, bytes memory err) internal override {
-        (int256 latitude, int256 longitude, uint256 status) = abi.decode(response, (int256, int256, uint256));
+    function fulfillRequest(
+        bytes32 requestId,
+        bytes memory response,
+        bytes memory /*err*/
+    )
+        internal
+        override
+    {
+        (int256 latitude, int256 longitude,) = abi.decode(response, (int256, int256, uint256));
         uint256 shipmentId = requestIdToShipment[requestId];
         Shipment storage shipment = shipments[shipmentId];
         require(shipment.status == ShipmentStatus.IN_TRANSIT);
@@ -292,13 +301,6 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
      * @custom:todo Implement manufacturing logic (burn ERC1155 -> mint ERC721).
      *
      */
-
-    mapping(uint256 => uint256) public productToShipment; //This links a finished product NFT to the shipment of raw materials used.
-    mapping(uint256 => uint256[]) public productToRawMaterial; //This connects a product to the raw materials used.
-    mapping(uint256 => uint256) public productAssemblyTimestamp; // timestamp when each product NFT was assembled (for metadata)
-    mapping(uint256 => bool) public shipmentConsumed; // Tracks whether a shipment has already been used for manufacturing
-
-    event ProductAssembled(uint256 shipmentId, address manufacturer, uint256 quantity);
 
     modifier onlyArrived(uint256 shipmentId) {
         _shipmentArrived(shipmentId);
@@ -435,4 +437,3 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
         return string(s);
     }
 }
-
