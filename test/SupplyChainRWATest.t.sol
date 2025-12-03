@@ -165,7 +165,7 @@ contract SupplyChainTest is Test {
             abi.encodeWithSignature("sendRequest(uint64,bytes,uint16,uint32,bytes32)"),
             abi.encode(mockRequestId)
         );
-        
+
         // Trigger the request
         vm.warp(block.timestamp + 1 days + 1); // Time travel to open window
         bytes memory performData = abi.encode(uint256(0));
@@ -182,32 +182,34 @@ contract SupplyChainTest is Test {
 
         // 5. Verify Nothing Changed
         (,,,,,, SupplyChainRWA.ShipmentStatus status,,) = supplyChain.shipments(0);
-        
+
         // Status should still be IN_TRANSIT (1), NOT ARRIVED (2)
-        assertEq(uint256(status), uint256(SupplyChainRWA.ShipmentStatus.IN_TRANSIT), "Should not arrive outside geofence");
-        
+        assertEq(
+            uint256(status), uint256(SupplyChainRWA.ShipmentStatus.IN_TRANSIT), "Should not arrive outside geofence"
+        );
+
         // Manufacturer should NOT have tokens
         assertEq(supplyChain.balanceOf(manufacturer, 1), 0, "Assets should remain in escrow");
     }
 
     function testOnlySupplierCanStartDelivery() public {
         createDummyShipment();
-        
+
         // Create an unauthorized attacker
         address attacker = makeAddr("attacker");
-        
+
         vm.startPrank(attacker);
-        
+
         // We expect the next line to revert because attacker lacks SUPPLIER_ROLE
-        vm.expectRevert(); 
+        vm.expectRevert();
         supplyChain.startDelivery(0);
-        
+
         vm.stopPrank();
     }
 
     function testCannotFulfillAlreadyArrivedShipment() public {
         // 1. Complete a valid delivery first (Happy Path)
-        testOrderFulfillment(); 
+        testOrderFulfillment();
 
         // Verify it is arrived
         (,,,,,, SupplyChainRWA.ShipmentStatus status,,) = supplyChain.shipments(0);
@@ -218,16 +220,16 @@ contract SupplyChainTest is Test {
         bytes memory response = abi.encode(int256(150), int256(100), uint256(1));
         bytes memory err = "";
 
-        // Since we manually mapped the request ID in the first test, 
+        // Since we manually mapped the request ID in the first test,
         // we need to manually map this new fake ID to shipment 0 for the test logic to find it
         // (In production, performUpkeep would do this, but we are skipping straight to the callback here)
         // Note: Accessing the mapping directly in test requires a "harness" or just repeating the setup.
         // EASIER STRATEGY: Just use the OLD request ID that is already mapped!
-        
+
         bytes32 oldRequestId = bytes32("request_1"); // From testOrderFulfillment
 
         vm.prank(router);
-        
+
         // We expect a revert because the contract checks: require(status == IN_TRANSIT)
         vm.expectRevert();
         supplyChain.handleOracleFulfillment(oldRequestId, response, err);
