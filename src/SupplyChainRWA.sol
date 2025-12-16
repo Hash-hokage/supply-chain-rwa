@@ -1,154 +1,161 @@
-//SPDX-License-Identifier: MIT
-
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
-
-/*//////////////////////////////////////////////////////////////
-                               IMPORTS
-//////////////////////////////////////////////////////////////*/
 
 import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
-import {Base64} from "@openzeppelin/contracts/utils/Base64.sol";
 
 import {ERC1155Holder} from "@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol";
-import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {
     AutomationCompatibleInterface
 } from "@chainlink/contracts/src/v0.8/automation/interfaces/AutomationCompatibleInterface.sol";
-import {IProductNft} from "src/IProduct.sol";
 import {FunctionsClient} from "@chainlink/contracts/src/v0.8/functions/v1_0_0/FunctionsClient.sol";
 import {FunctionsRequest} from "@chainlink/contracts/src/v0.8/functions/v1_0_0/libraries/FunctionsRequest.sol";
-import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+
+import {IProductNft} from "src/IProduct.sol";
 
 /**
- * @title RWA Supply Chain Orchestrator
- * @author Omisade Olamiposi
- * @notice Manages the life cycle of Real World Assets(RWA) from raw material sourcing to final delivery.
- * @dev Implements a hybrid Chainlink architecture:
- *       1. Automation: Monitors shipments in transit.
- *       2. Functions(planned): Verifies IoT GPS/Temprature data before state transitions.
- *       3. ERC1155: Represents batch raw materials.
+ * @title SupplyChainRWA
+ * @notice Real-World Asset supply chain orchestrator with Chainlink Automation + Functions integration.
+ * @dev Tracks raw material shipments (ERC1155), verifies delivery via IoT oracle, releases assets on arrival,
+ *      and enables manufacturers to assemble final products (ERC721).
  */
-
-contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationCompatibleInterface, FunctionsClient {
-    /*//////////////////////////////////////////////////////////////
-                                 ERRORS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Thrown when an operation is attempted on a shipment not currently moving.
-    error SupplyChainRWA__shipmentNotInTransit();
-    /// @notice Thrown when an operation is attempted on a shipment that has not been created.
-    error SupplyChainRWA__shipmentNotCreated();
-
-    /*//////////////////////////////////////////////////////////////
-                                 TYPES
-    //////////////////////////////////////////////////////////////*/
-
+contract SupplyChainRWA is
+    ERC1155,
+    AccessControl,
+    ERC1155Holder,
+    ReentrancyGuard,
+    AutomationCompatibleInterface,
+    FunctionsClient
+{
     using FunctionsRequest for FunctionsRequest.Request;
     using Strings for uint256;
 
     /*//////////////////////////////////////////////////////////////
-                                 ROLES
+                                 ERRORS
     //////////////////////////////////////////////////////////////*/
-
-    /// @dev roles for entities that transform raw materials.
-    bytes32 public constant MANUFACTURER_ROLE = keccak256("MANUFACTURER_ROLE");
-    /// @dev roles for entities that supply raw materials.
-    bytes32 public constant SUPPLIER_ROLE = keccak256("SUPPLIER_ROLE");
+    error ShipmentNotInTransit();
+    error ShipmentNotCreated();
+    error ShipmentNotArrived();
+    error UpkeepAlreadyInProgress();
+    error TooManyActiveShipments();
+    error TooManyMaterials();
+    error InvalidETA();
+    error InvalidRadius();
+    error UnauthorizedManufacturer();
+    error ShipmentAlreadyConsumed();
+    error ForceArrivalTooEarly();
+    error InvalidInput();
 
     /*//////////////////////////////////////////////////////////////
-                              STATE & TYPES
+                                 ROLES
     //////////////////////////////////////////////////////////////*/
-    enum ShipmentStatus {
-        CREATED, // Material locked and ready ready for pickup or transportation.
-        IN_TRANSIT, // En Route to destination.
-        ARRIVED // Arrived at destination.
-    }
+    bytes32 public constant SUPPLIER_ROLE = keccak256("SUPPLIER_ROLE");
+    bytes32 public constant MANUFACTURER_ROLE = keccak256("MANUFACTURER_ROLE");
 
-    /// @notice Defines the parameters of a physical shipment.
-    /// @dev Uses int256 for coordinates to handle negative values (South/West).
-    struct Shipment {
-        // --- Geospatial Data ---
-        int256 destLat; // Latitude (multiplied by 10^6 for precision).
-        int256 destLong; // Longitude (multiplied by 10^6 for precision).
-        uint256 radius; // accepted delivery raduis in meters.
+    /*//////////////////////////////////////////////////////////////
+                              CONSTANTS
+    //////////////////////////////////////////////////////////////*/
+    uint256 public constant MIN_ETA_DELAY = 1 hours;
+    uint256 public constant MAX_ETA_DELAY = 90 days;
+    uint256 public constant MAX_CONCURRENT_SHIPMENTS = 500;
+    uint256 public constant MAX_MATERIALS_PER_PRODUCT = 10;
+    uint256 public constant GPS_CHECK_COOLDOWN = 15 minutes;
+    uint256 public constant FORCE_ARRIVAL_DELAY = 24 hours;
+    uint8 public constant MAX_GPS_CHECKS = 5;
 
-        // --- Asset Data ---
-        address manufacturer; // The Intended receipient.
-        uint256 rawMaterialId; // The ERC1155 token Id.
-        uint256 amount; // quantity of token
-
-        // --- System State ---
-        ShipmentStatus status;
-
-        uint256 expectedArrivalTime;
-        uint256 lastCheckTimestamp;
-    }
-
-    /// @notice Registry of all shipments tracked by the protocol.
-    mapping(uint256 shipmentId => Shipment) public shipments;
-    mapping(uint256 => uint256) public productToShipment; //This links a finished product NFT to the shipment of raw materials used.
-    mapping(uint256 => uint256[]) public productToRawMaterial; //This connects a product to the raw materials used.
-    mapping(uint256 => uint256) public productAssemblyTimestamp; // timestamp when each product NFT was assembled (for metadata)
-    mapping(uint256 => bool) public shipmentConsumed; // Tracks whether a shipment has already been used for manufacturing
-    mapping(bytes32 requestId => uint256 shipmentId) public requestIdToShipment;
-
-    /// @notice Counter to generate unique Shipment IDs.
-    uint256 public shipmentCounter;
-
+    /*//////////////////////////////////////////////////////////////
+                       CHAINLINK FUNCTIONS STATE
+    //////////////////////////////////////////////////////////////*/
     uint64 public subscriptionId;
     uint32 public gasLimit;
     bytes32 public donId;
 
     /*//////////////////////////////////////////////////////////////
-                                 EVENTS
+                          SHIPMENT STATE
     //////////////////////////////////////////////////////////////*/
-    event ShipmentArrived(uint256 shipmentId, address manufacturer);
-    event ProductAssembled(uint256 shipmentId, address manufacturer, uint256 quantity);
+    enum ShipmentStatus {
+        CREATED,
+        IN_TRANSIT,
+        ARRIVED
+    }
+
+    struct Shipment {
+        int256 destLat; // x 1e6
+        int256 destLong; // x 1e6
+        uint256 radius; // meters
+        address manufacturer;
+        uint256 rawMaterialId;
+        uint256 amount;
+        ShipmentStatus status;
+        uint256 expectedArrivalTime;
+        uint8 gpsChecksPerformed;
+        uint256 lastGpsCheckTimestamp;
+    }
+
+    mapping(uint256 => Shipment) public shipments;
+    uint256 public shipmentCounter;
+
+    // Active list for scalable Chainlink Automation
+    uint256[] private activeInTransitShipments;
+    mapping(uint256 => uint256) private shipmentIndexInActiveArray; // shipmentId → index+1
+
+    // Upkeep protection
+    mapping(uint256 => bool) public pendingUpkeep;
+
+    // Chainlink Functions request tracking
+    mapping(bytes32 => uint256) public requestIdToShipment;
 
     /*//////////////////////////////////////////////////////////////
-                               FUNCTIONS
+                          MANUFACTURING STATE
     //////////////////////////////////////////////////////////////*/
+    mapping(uint256 => uint256) public productToShipment;
+    mapping(uint256 => uint256[MAX_MATERIALS_PER_PRODUCT]) public productRawMaterials;
+    mapping(uint256 => uint8) public productMaterialCount;
+    mapping(uint256 => uint256) public productAssemblyTimestamp;
+    mapping(uint256 => bool) public shipmentConsumed;
 
-    /// @notice Sets up the governance roles.
-    /// @param uri The metadata URI for the ERC1155 tokens.
+    IProductNft public immutable productNft;
+
+    /*//////////////////////////////////////////////////////////////
+                                 EVENTS
+    //////////////////////////////////////////////////////////////*/
+    event ShipmentCreated(uint256 indexed shipmentId, address indexed manufacturer, uint256 expectedArrivalTime);
+    event ShipmentArrived(uint256 indexed shipmentId, address indexed manufacturer);
+    event ProductAssembled(uint256 indexed shipmentId, address indexed manufacturer, uint256 quantity);
+    event OracleRequestFailed(uint256 indexed shipmentId, bytes error);
+    event ForceArrival(uint256 indexed shipmentId, address indexed caller);
+
+    /*//////////////////////////////////////////////////////////////
+                              CONSTRUCTOR
+    //////////////////////////////////////////////////////////////*/
     constructor(
         string memory uri,
-        address nftAddress,
-        address router,
+        address _productNft,
+        address _functionsRouter,
         uint64 _subscriptionId,
         uint32 _gasLimit,
         bytes32 _donId
-    ) ERC1155(uri) FunctionsClient(router) {
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        productNft = IProductNft(nftAddress);
+    ) ERC1155(uri) FunctionsClient(_functionsRouter) {
+        productNft = IProductNft(_productNft);
+
         subscriptionId = _subscriptionId;
         gasLimit = _gasLimit;
         donId = _donId;
+
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          SUPPLIER FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+    function mint(address to, uint256 id, uint256 amount, bytes memory data) external onlyRole(SUPPLIER_ROLE) {
+        _mint(to, id, amount, data);
     }
 
     /**
-     * @notice Mints new raw material tokens.
-     * @dev Only callable by verified Suppliers.
-     * @param account The address receiving the tokens.
-     * @param id The token ID type.
-     * @param amount The quantity to mint.
-     * @param data Additional data for hooks
-     */
-    function mint(address account, uint256 id, uint256 amount, bytes memory data) public onlyRole(SUPPLIER_ROLE) {
-        _mint(account, id, amount, data);
-    }
-
-    /**
-     * @notice Locks raw materials and initializes a shipment request.
-     * @dev Transfers ERC1155 tokens from Supplier to this Contract (Escrow).
-     * @param destLat Destination Latitude (e.g. 6.5244 * 10^6).
-     * @param destLong Destination Longitude.
-     * @param radius Allowed error margin for GPS delivery.
-     * @param manufacturer The address of the receiver.
-     * @param rawMaterialId The token ID being shipped.
-     * @param amount The quantity being shipped.
+     * @notice Supplier locks raw materials and creates a shipment.
      */
     function createShipment(
         int256 destLat,
@@ -157,14 +164,20 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
         address manufacturer,
         uint256 rawMaterialId,
         uint256 amount,
-        uint256 expectedArrivalTime,
-        uint256 lastCheckTimestamp
-    ) external onlyRole(SUPPLIER_ROLE) {
-        // Escrow assets
+        uint256 expectedArrivalTime
+    ) external onlyRole(SUPPLIER_ROLE) nonReentrant {
+        if (
+            expectedArrivalTime < block.timestamp + MIN_ETA_DELAY
+                || expectedArrivalTime > block.timestamp + MAX_ETA_DELAY
+        ) {
+            revert InvalidETA();
+        }
+        if (radius < 50 || radius > 10_000) revert InvalidRadius();
+
         safeTransferFrom(msg.sender, address(this), rawMaterialId, amount, "");
 
-        //Register Shipment
-        shipments[shipmentCounter] = Shipment({
+        uint256 shipmentId = shipmentCounter++;
+        shipments[shipmentId] = Shipment({
             destLat: destLat,
             destLong: destLong,
             radius: radius,
@@ -173,235 +186,198 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
             amount: amount,
             status: ShipmentStatus.CREATED,
             expectedArrivalTime: expectedArrivalTime,
-            lastCheckTimestamp: lastCheckTimestamp
+            gpsChecksPerformed: 0,
+            lastGpsCheckTimestamp: 0
         });
-        shipmentCounter++;
+
+        emit ShipmentCreated(shipmentId, manufacturer, expectedArrivalTime);
     }
 
-    /// @notice Marks a shipment as picked up and moving.
-    /// @param shipmentId The ID of the shipment to update.
+    /**
+     * @notice Supplier marks shipment as picked up and in transit.
+     */
     function startDelivery(uint256 shipmentId) external onlyRole(SUPPLIER_ROLE) {
-        Shipment storage shipment = shipments[shipmentId];
+        Shipment storage s = shipments[shipmentId];
+        if (s.status != ShipmentStatus.CREATED) revert ShipmentNotCreated();
 
-        if (shipment.status != ShipmentStatus.CREATED) {
-            revert SupplyChainRWA__shipmentNotCreated();
-        } else {
-            shipment.status = ShipmentStatus.IN_TRANSIT;
-        }
+        s.status = ShipmentStatus.IN_TRANSIT;
+        _addToActiveList(shipmentId);
     }
 
     /*//////////////////////////////////////////////////////////////
-                             AUTOMATION & IOT
+                     CHAINLINK AUTOMATION + FUNCTIONS
     //////////////////////////////////////////////////////////////*/
+    function checkUpkeep(bytes calldata) external view override returns (bool upkeepNeeded, bytes memory performData) {
+        for (uint256 i = 0; i < activeInTransitShipments.length; i++) {
+            uint256 id = activeInTransitShipments[i];
+            Shipment memory s = shipments[id];
 
-    /**
-     * @notice Chainlink Automation: Checks if any shipment needs an update.
-     * @dev Scans open shipments. If IN_TRANSIT, calculates if its in geoFence and triggers performUpkeep.
-     * @return upkeepNeeded True if a shipment is moving and within geoFence.
-     * @return performData Encoded ID of the shipment to check.
-     */
-    function checkUpkeep(
-        bytes calldata /*checkData*/
-    )
-        external
-        view
-        returns (
-            bool upkeepNeeded,
-            bytes memory /* performData */
-        )
-    {
-        for (uint256 i = 0; i < shipmentCounter; i++) {
-            Shipment storage shipment = shipments[i];
-
-            if (shipment.status == ShipmentStatus.IN_TRANSIT) {
-                if (
-                    (block.timestamp >= shipment.expectedArrivalTime)
-                        && (block.timestamp - shipment.lastCheckTimestamp >= 30 minutes
-                            || shipment.lastCheckTimestamp == 0)
-                ) {
-                    return (true, abi.encode(i));
-                }
+            if (
+                s.status == ShipmentStatus.IN_TRANSIT && block.timestamp >= s.expectedArrivalTime
+                    && s.gpsChecksPerformed < MAX_GPS_CHECKS
+                    && (s.lastGpsCheckTimestamp == 0 || block.timestamp >= s.lastGpsCheckTimestamp + GPS_CHECK_COOLDOWN)
+            ) {
+                return (true, abi.encode(id));
             }
         }
         return (false, "");
     }
 
-    /**
-     * @notice Chainlink Automation: Executes the state change.
-     * @dev CURRENTLY: Auto-arrives the shipment (for testing).
-     * @custom:todo INTEGRATION: This function should trigger a Chainlink Function Request
-     *              to verify GPS coordinates before marking as ARRIVED.
-     */
     function performUpkeep(bytes calldata performData) external override {
-        // 1. Decode the Shipment ID from the checkUpkeep data
-        (uint256 shipmentId) = abi.decode(performData, (uint256));
+        uint256 shipmentId = abi.decode(performData, (uint256));
+        Shipment storage s = shipments[shipmentId];
 
-        // 2. Define the JS Source Code
-        string memory source = "const lat = response.data.latitude;" "const long = response.data.longitude;"
-            "const stat = response.data.status;"
-            "return Buffer.concat([Functions.encodeInt256(lat), Functions.encodeInt256(long), Functions.encodeUint256(stat)]);";
+        if (pendingUpkeep[shipmentId]) revert UpkeepAlreadyInProgress();
+        pendingUpkeep[shipmentId] = true;
 
-        // 3. Initialize the Request
+        s.gpsChecksPerformed += 1;
+        s.lastGpsCheckTimestamp = block.timestamp;
+
+        string memory source =
+            "const lat = response.data.latitude; const long = response.data.longitude; return Functions.encodeInt256(lat).concat(Functions.encodeInt256(long));";
+
         FunctionsRequest.Request memory req;
         req.initializeRequestForInlineJavaScript(source);
 
-        // 4. Set Args
         string[] memory args = new string[](1);
         args[0] = shipmentId.toString();
         req.setArgs(args);
 
-        // 5. Send the Request
         bytes32 requestId = _sendRequest(req.encodeCBOR(), subscriptionId, gasLimit, donId);
-
-        // 6. Save the link so we know which shipment this request belongs to
         requestIdToShipment[requestId] = shipmentId;
     }
 
-    function fulfillRequest(
-        bytes32 requestId,
-        bytes memory response,
-        bytes memory /*err*/
-    )
-        internal
-        override
-    {
-        (int256 latitude, int256 longitude,) = abi.decode(response, (int256, int256, uint256));
+    function fulfillRequest(bytes32 requestId, bytes memory response, bytes memory err) internal override {
         uint256 shipmentId = requestIdToShipment[requestId];
-        Shipment storage shipment = shipments[shipmentId];
-        require(shipment.status == ShipmentStatus.IN_TRANSIT);
-        int256 diffLat = latitude - shipment.destLat;
-        int256 diffLong = longitude - shipment.destLong;
-        uint256 squaredDistance = uint256((diffLong * diffLong) + (diffLat * diffLat));
-        if (squaredDistance <= (shipment.radius * shipment.radius)) {
-            shipment.status = ShipmentStatus.ARRIVED;
-            // Release assets from Escrow to Manufacturer
-            _safeTransferFrom(address(this), shipment.manufacturer, shipment.rawMaterialId, shipment.amount, "");
-            emit ShipmentArrived(shipmentId, shipment.manufacturer);
+        delete requestIdToShipment[requestId];
+
+        if (err.length > 0) {
+            emit OracleRequestFailed(shipmentId, err);
+            return;
+        }
+
+        delete pendingUpkeep[shipmentId];
+
+        (int256 lat, int256 lng) = abi.decode(response, (int256, int256));
+        Shipment storage s = shipments[shipmentId];
+
+        int256 dLat = lat - s.destLat;
+        int256 dLng = lng - s.destLong;
+        uint256 distanceSq = uint256((dLng * dLng) + (dLat * dLat));
+
+        if (distanceSq <= s.radius * s.radius) {
+            _completeArrival(shipmentId, s);
         }
     }
 
-    // ==========================================
-    // 🔧 OVERRIDES
-    // ==========================================
+    /*//////////////////////////////////////////////////////////////
+                          FORCE ARRIVAL
+    //////////////////////////////////////////////////////////////*/
+    function manufacturerForceArrival(uint256 shipmentId) external {
+        Shipment storage s = shipments[shipmentId];
+        if (s.status != ShipmentStatus.IN_TRANSIT) revert ShipmentNotInTransit();
+        if (msg.sender != s.manufacturer) revert UnauthorizedManufacturer();
+        if (block.timestamp < s.expectedArrivalTime + FORCE_ARRIVAL_DELAY) revert ForceArrivalTooEarly();
 
-    function supportsInterface(bytes4 interfaceId)
-        public
-        view
-        override(ERC1155, AccessControl, ERC1155Holder)
-        returns (bool)
-    {
-        return super.supportsInterface(interfaceId);
+        _completeArrival(shipmentId, s);
+    }
+
+    function forceArrival(uint256 shipmentId) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        Shipment storage s = shipments[shipmentId];
+        if (s.status != ShipmentStatus.IN_TRANSIT) revert ShipmentNotInTransit();
+        _completeArrival(shipmentId, s);
+    }
+
+    function _completeArrival(uint256 shipmentId, Shipment storage s) internal {
+        s.status = ShipmentStatus.ARRIVED;
+        _removeFromActiveList(shipmentId);
+        delete pendingUpkeep[shipmentId];
+
+        _safeTransferFrom(address(this), s.manufacturer, s.rawMaterialId, s.amount, "");
+
+        emit ShipmentArrived(shipmentId, s.manufacturer);
+        emit ForceArrival(shipmentId, msg.sender);
     }
 
     /*//////////////////////////////////////////////////////////////
-                               MANUFACTURING LOGIC
+                          MANUFACTURING
     //////////////////////////////////////////////////////////////*/
-    /**
-     * @notice Converts raw materials into a final product (ERC721).
-     * @custom:todo Implement manufacturing logic (burn ERC1155 -> mint ERC721).
-     *
-     */
-
     modifier onlyArrived(uint256 shipmentId) {
-        _shipmentArrived(shipmentId);
+        if (shipments[shipmentId].status != ShipmentStatus.ARRIVED) revert ShipmentNotArrived();
         _;
     }
-
-    function _shipmentArrived(uint256 shipmentId) internal view {
-        require(shipments[shipmentId].status == ShipmentStatus.ARRIVED, "Shipment not arrived");
-    }
-    //interface
-    IProductNft public productNft;
-
-    //asssemble function
 
     function assembleProduct(uint256 shipmentId, string[] calldata metadataURIs)
         external
         onlyRole(MANUFACTURER_ROLE)
         onlyArrived(shipmentId)
+        nonReentrant
     {
-        // Load shipment details into memory for use in the function
-        Shipment memory shipment = shipments[shipmentId];
+        Shipment memory s = shipments[shipmentId];
+        if (msg.sender != s.manufacturer) revert UnauthorizedManufacturer();
+        if (shipmentConsumed[shipmentId]) revert ShipmentAlreadyConsumed();
+        if (balanceOf(msg.sender, s.rawMaterialId) < s.amount) {
+            revert ERC1155InsufficientBalance(
+                msg.sender, s.amount, balanceOf(msg.sender, s.rawMaterialId), s.rawMaterialId
+            );
+        }
+        if (metadataURIs.length != s.amount) revert InvalidInput();
 
-        // Ensures only the manufacturer assigned to this shipment
-        // is allowed to assemble products from it
-        require(msg.sender == shipment.manufacturer, "Not authorized manufacturer");
-
-        uint256 rawId = shipment.rawMaterialId; // The raw material type used
-        uint256 amount = shipment.amount; // How many raw units shipped
-
-        // Prevent re-using the same shipment twice for manufacturing
-        require(!shipmentConsumed[shipmentId], "Shipment already used");
-
-        // Ensure manufacturer actually owns the raw materials being consumed
-        require(balanceOf(msg.sender, rawId) >= amount, "Not enough raw materials");
-
-        // Each unit being manufactured must have one metadata URI
-        require(metadataURIs.length == amount, "Metadata list must match raw material amount");
-
-        // Mark this shipment as used so it cannot be assembled again
         shipmentConsumed[shipmentId] = true;
+        _burn(msg.sender, s.rawMaterialId, s.amount);
 
-        // Burn all raw materials used in this assembly step
-        // This ensures 1-to-1 conversion: raw → product
-        _burn(msg.sender, rawId, amount);
+        for (uint256 i = 0; i < s.amount; i++) {
+            uint256 productId = productNft.mintProductNft(msg.sender, metadataURIs[i]);
 
-        // Mint a new product NFT for each raw material unit
-        for (uint256 i = 0; i < amount; i++) {
-            // Mint product NFT to the manufacturer with its specific metadata URI
-            uint256 newProductId = productNft.mintProductNft(msg.sender, metadataURIs[i]);
+            productToShipment[productId] = shipmentId;
+            productAssemblyTimestamp[productId] = block.timestamp;
 
-            // Link product → shipment, enabling traceability
-            productToShipment[newProductId] = shipmentId;
-
-            // Track which raw material type was used to produce this product
-            productToRawMaterial[newProductId].push(rawId);
-            // Record the assembly timestamp for provenance
-            productAssemblyTimestamp[newProductId] = block.timestamp;
+            uint8 count = productMaterialCount[productId];
+            if (count >= MAX_MATERIALS_PER_PRODUCT) revert TooManyMaterials();
+            productRawMaterials[productId][count] = s.rawMaterialId;
+            productMaterialCount[productId] = count + 1;
         }
 
-        // Emit event for audit trails and off-chain indexing
-        emit ProductAssembled(shipmentId, msg.sender, amount);
+        emit ProductAssembled(shipmentId, msg.sender, s.amount);
     }
 
-    /**
-     * @notice Build JSON metadata for a product (human readable provenance).
-     * @dev This returns raw JSON string (not base64). ProductNft.tokenURI will encode it.
-     */
-    function buildMetadata(uint256 productId) public view returns (string memory) {
+    /*//////////////////////////////////////////////////////////////
+                             METADATA
+    //////////////////////////////////////////////////////////////*/
+    function buildMetadata(uint256 productId) external view returns (string memory) {
         uint256 shipmentId = productToShipment[productId];
-        uint256[] memory raws = productToRawMaterial[productId];
         uint256 assembledAt = productAssemblyTimestamp[productId];
-
         Shipment memory s = shipments[shipmentId];
+
+        string memory materialAttrs = "";
+        uint8 count = productMaterialCount[productId];
+        for (uint8 i = 0; i < count; i++) {
+            if (i > 0) materialAttrs = string(abi.encodePacked(materialAttrs, ","));
+            materialAttrs = string(
+                abi.encodePacked(
+                    materialAttrs,
+                    '{"trait_type":"Raw Material ',
+                    Strings.toString(i + 1),
+                    ' ID","value":"',
+                    Strings.toString(productRawMaterials[productId][i]),
+                    '"}'
+                )
+            );
+        }
+        if (count == 0) materialAttrs = '{"trait_type":"Raw Material","value":"Unknown"}';
 
         string memory attrs = string(
             abi.encodePacked(
-                '{"trait_type":"shipmentId","value":"',
+                '{"trait_type":"Shipment ID","value":"',
                 Strings.toString(shipmentId),
                 '"},',
-                '{"trait_type":"rawMaterialId","value":"',
-                (raws.length > 0 ? Strings.toString(raws[0]) : "0"),
+                materialAttrs,
+                ',{"trait_type":"Manufacturer","value":"',
+                _addressToString(s.manufacturer),
                 '"},',
-                '{"trait_type":"manufacturer","value":"',
-                toAsciiString(s.manufacturer),
-                '"},',
-                '{"trait_type":"assembledAt","value":"',
+                '{"trait_type":"Assembled At","value":"',
                 Strings.toString(assembledAt),
                 '"}'
-            )
-        );
-
-        string memory description = string(
-            abi.encodePacked(
-                "Product assembled from raw material batch #",
-                (raws.length > 0 ? Strings.toString(raws[0]) : "0"),
-                " (shipment #",
-                Strings.toString(shipmentId),
-                ") by ",
-                toAsciiString(s.manufacturer),
-                " on ",
-                Strings.toString(assembledAt)
             )
         );
 
@@ -409,31 +385,57 @@ contract SupplyChainRWA is ERC1155, AccessControl, ERC1155Holder, AutomationComp
             abi.encodePacked(
                 '{"name":"Product #',
                 Strings.toString(productId),
-                '", "description":"',
-                description,
-                '", "attributes":[',
+                '","description":"Assembled from shipment #',
+                Strings.toString(shipmentId),
+                " by ",
+                _addressToString(s.manufacturer),
+                " on ",
+                Strings.toString(assembledAt),
+                '","attributes":[',
                 attrs,
                 "]}"
             )
         );
     }
 
-    //helper to convert address to string
-    /// @dev helper to convert address to string (0x...)
-    function toAsciiString(address x) internal pure returns (string memory) {
-        bytes memory s = new bytes(42);
-        bytes memory hexChars = "0123456789abcdef";
+    function getShipmentStatus(uint256 shipmentId) external view returns (uint8) {
+        return uint8(shipments[shipmentId].status);
+    }
 
-        s[0] = "0";
-        s[1] = "x";
+    /*//////////////////////////////////////////////////////////////
+                          INTERNAL HELPERS
+    //////////////////////////////////////////////////////////////*/
+    function _addToActiveList(uint256 shipmentId) internal {
+        if (activeInTransitShipments.length >= MAX_CONCURRENT_SHIPMENTS) revert TooManyActiveShipments();
+        activeInTransitShipments.push(shipmentId);
+        shipmentIndexInActiveArray[shipmentId] = activeInTransitShipments.length;
+    }
 
-        uint256 u = uint256(uint160(x));
+    function _removeFromActiveList(uint256 shipmentId) internal {
+        uint256 index = shipmentIndexInActiveArray[shipmentId] - 1;
+        if (index >= activeInTransitShipments.length) return;
 
-        for (uint256 i = 0; i < 20; i++) {
-            s[2 + i * 2] = hexChars[(u >> (8 * (19 - i) + 4)) & 0xf];
-            s[3 + i * 2] = hexChars[(u >> (8 * (19 - i))) & 0xf];
-        }
+        uint256 lastId = activeInTransitShipments[activeInTransitShipments.length - 1];
+        activeInTransitShipments[index] = lastId;
+        shipmentIndexInActiveArray[lastId] = index + 1;
 
-        return string(s);
+        activeInTransitShipments.pop();
+        delete shipmentIndexInActiveArray[shipmentId];
+    }
+
+    function _addressToString(address addr) internal pure returns (string memory) {
+        return addr == address(0) ? "0x0000000000000000000000000000000000000000" : Strings.toHexString(addr);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                             INTERFACE
+    //////////////////////////////////////////////////////////////*/
+    function supportsInterface(bytes4 interfaceId)
+        public
+        view
+        override(ERC1155, AccessControl, ERC1155Holder)
+        returns (bool)
+    {
+        return super.supportsInterface(interfaceId);
     }
 }

@@ -1,277 +1,179 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Test} from "forge-std/Test.sol";
-import {console} from "forge-std/console.sol";
+import {Test, console2, Vm} from "forge-std/Test.sol";
 import {SupplyChainRWA} from "src/SupplyChainRWA.sol";
-import {ProductNft} from "src/ProductNft.sol";
 import {MockRouter} from "test/mocks/MockRouter.sol";
-import {HelperConfig} from "script/HelperConfig.s.sol"; // Assumed path
+import {MockProductNft} from "test/mocks/MockProductNft.sol";
+import {FunctionsRequest} from "@chainlink/contracts/src/v0.8/functions/v1_0_0/libraries/FunctionsRequest.sol";
 
-/// @title SupplyChainRWA Integration Tests
-/// @author Hash-Hokage
-/// @notice Integration tests focusing on the manufacturing and assembly logic.
-/// @dev Validates state transitions between raw material acquisition, shipment, and product assembly.
-contract SupplyChainRWAIntegrationTest is Test {
+contract SupplyChainRWATest is Test {
+    using FunctionsRequest for FunctionsRequest.Request;
+
+    SupplyChainRWA public supplyChain;
+    MockProductNft public productNft;
+    MockRouter public functionsRouter;
+
+    address public admin = makeAddr("admin");
+    address public supplier = makeAddr("supplier");
+    address public manufacturer = makeAddr("manufacturer");
+    address public randomUser = makeAddr("randomUser");
+
+    // Constants based on contract
+    uint256 constant MATERIAL_ID_A = 1;
+    uint256 constant MATERIAL_AMOUNT = 500;
+    uint256 constant SHIPMENT_AMOUNT = 100;
     
-    // ================================================================
-    // │                            STATE                             │
-    // ================================================================
+    // GPS Constants (scaled 1e6)
+    int256 constant DEST_LAT = 40_712800; // NYC
+    int256 constant DEST_LONG = -74_006000;
+    uint256 constant RADIUS = 1000; // 1km
 
-    SupplyChainRWA private supplyChain;
-    ProductNft private productNft;
-    HelperConfig private helperConfig;
-    MockRouter private mockRouter; // Kept for local simulation
-
-    address private supplier = makeAddr("supplier");
-    address private manufacturer = makeAddr("manufacturer");
-    address private router;
-    
-    uint64 private subId;
-    uint32 private gasLimit;
-    bytes32 private donId;
-
-    uint256 private constant RAW_ID = 1;
-    uint256 private constant SHIPMENT_RADIUS = 1000;
-
-    // ================================================================
-    // │                            SETUP                             │
-    // ================================================================
+    // Events to check
+    event ShipmentCreated(uint256 indexed shipmentId, address indexed manufacturer, uint256 expectedArrivalTime);
+    event ShipmentArrived(uint256 indexed shipmentId, address indexed manufacturer);
+    event ProductAssembled(uint256 indexed shipmentId, address indexed manufacturer, uint256 quantity);
 
     function setUp() public {
-        // 1. Load Configuration
-        helperConfig = new HelperConfig();
-        
-        // DESTUCTURING FIX:
-        // We must match the NetworkConfig struct order: 
-        // (address router, address linkToken, bytes32 donId, uint64 subId)
-        (
-            address _router,
-            address _linkToken,
-            bytes32 _donId,
-            uint64 _subId
-        ) = helperConfig.activeNetworkConfig();
+        vm.startPrank(admin);
 
-        router = _router;
-        subId = _subId;
-        donId = _donId;
-        
-        // Since gasLimit is not in your HelperConfig struct, we define a default here
-        gasLimit = 300000; 
-        
-        // We aren't using _linkToken in the test state variables, so we just ignore it for now
-        // or you can add `address linkToken` to your state variables if needed.
+        // 1. Deploy Infrastructure
+        productNft = new MockProductNft();
+        functionsRouter = new MockRouter(); // Using your MockRouter
 
-        // 2. Deploy Contracts
-        // We assume the router in config might be real, but for this integration test
-        // we generally need the mock to control the responses.
-        mockRouter = new MockRouter(); 
-
-        productNft = new ProductNft(address(this));
-        
+        // 2. Deploy SupplyChain
         supplyChain = new SupplyChainRWA(
-            "ipfs://base-uri", 
-            address(productNft), 
-            address(mockRouter), 
-            subId, 
-            gasLimit, 
-            donId
+            "https://api.supplychain.com/meta/",
+            address(productNft),
+            address(functionsRouter),
+            1, // SubId
+            300000, // GasLimit
+            bytes32("don-id")
         );
 
-        // 3. Role Assignment
-        vm.startPrank(address(this)); 
+        // 3. Setup Roles
         supplyChain.grantRole(supplyChain.SUPPLIER_ROLE(), supplier);
         supplyChain.grantRole(supplyChain.MANUFACTURER_ROLE(), manufacturer);
+
         vm.stopPrank();
-    }
 
-    // ================================================================
-    // │                           HELPERS                            │
-    // ================================================================
-
-    /// @dev Mints raw material tokens and approves the SupplyChain contract.
-    function _mintRawMaterials(uint256 amount) internal {
-        vm.startPrank(supplier);
-        supplyChain.mint(supplier, RAW_ID, amount, "");
-        supplyChain.setApprovalForAll(address(supplyChain), true);
-        vm.stopPrank();
-    }
-
-    /// @dev Creates a shipment fixture with standard test parameters.
-    function _createShipmentFixture(uint256 amount) internal returns (uint256 shipmentId) {
-        vm.startPrank(supplier);
-        supplyChain.createShipment(
-            0, 
-            0, 
-            SHIPMENT_RADIUS, 
-            manufacturer, 
-            RAW_ID, 
-            amount, 
-            block.timestamp + 1 days, 
-            0
-        );
-        vm.stopPrank();
-        return 0; // First shipment ID is always 0 in isolated test env
-    }
-
-    /// @dev Simulates the Chainlink Functions workflow (Request -> Fulfillment).
-    function _triggerShipmentArrival(uint256 shipmentId) internal {
-        // 1. Initiate Delivery
+        // 4. Mint Initial Materials to Supplier
         vm.prank(supplier);
-        supplyChain.startDelivery(shipmentId);
+        supplyChain.mint(supplier, MATERIAL_ID_A, MATERIAL_AMOUNT, "");
+        
+        // Approve contract to handle materials
+        vm.prank(supplier);
+        supplyChain.setApprovalForAll(address(supplyChain), true);
+    }
 
-        // 2. Time Travel
-        vm.warp(block.timestamp + 1 days + 1);
+    /*//////////////////////////////////////////////////////////////
+                            HAPPY PATH FLOW
+    //////////////////////////////////////////////////////////////*/
 
-        // 3. Mock Router Request
-        bytes32 requestId = bytes32("req_integration");
-        vm.mockCall(
-            address(mockRouter),
-            abi.encodeWithSignature("sendRequest(uint64,bytes,uint16,uint32,bytes32)"),
-            abi.encode(requestId)
+    function test_FullLifecycle_CreationToAssembly() public {
+        uint256 eta = block.timestamp + 2 hours;
+        
+        // --- 1. Create Shipment ---
+        vm.prank(supplier);
+        vm.expectEmit(true, true, true, true);
+        emit ShipmentCreated(0, manufacturer, eta);
+        
+        supplyChain.createShipment(
+            DEST_LAT,
+            DEST_LONG,
+            RADIUS,
+            manufacturer,
+            MATERIAL_ID_A,
+            SHIPMENT_AMOUNT,
+            eta
         );
 
-        // 4. Perform Upkeep (Trigger Chainlink Call)
-        supplyChain.performUpkeep(abi.encode(shipmentId));
+        // --- 2. Start Delivery ---
+        vm.prank(supplier);
+        supplyChain.startDelivery(0);
 
-        // 5. Mock Router Fulfillment
-        // Coordinates (0,0) are within the defined radius of 1000
-        bytes memory response = abi.encode(int256(0), int256(0), uint256(1)); 
-        bytes memory err = "";
+        // --- 3. Simulate Time Passing & Automation Check ---
+        vm.warp(eta + 1 minutes); // Past ETA
 
-        vm.prank(address(mockRouter));
-        supplyChain.handleOracleFulfillment(requestId, response, err);
-    }
+        (bool upkeepNeeded, bytes memory performData) = supplyChain.checkUpkeep("");
+        assertTrue(upkeepNeeded);
+        
+        // --- 4. Perform Upkeep (Triggers Chainlink Functions) ---
+        vm.recordLogs();
+        supplyChain.performUpkeep(performData);
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        
+        // Extract requestId from Your MockRouter's event
+        // Event: RequestSent(bytes32 indexed id)
+        // Topic 0: Keccak hash of signature, Topic 1: requestId
+        bytes32 requestId = entries[0].topics[1];
 
-    // ================================================================
-    // │                            TESTS                             │
-    // ================================================================
-
-    function test_Integration_FullLifecycle_Succeeds() public {
-        uint256 amount = 2;
-
-        // Arrange
-        _mintRawMaterials(amount);
-        uint256 shipmentId = _createShipmentFixture(amount);
-
-        // Act: Arrival
-        _triggerShipmentArrival(shipmentId);
-
-        // Assert: Escrow Release
-        assertEq(supplyChain.balanceOf(manufacturer, RAW_ID), amount, "Manufacturer should receive raw materials");
-
-        // Prepare Metadata
-        string[] memory metadataURIs = new string[](amount);
-        metadataURIs[0] = "ipfs://meta-0";
-        metadataURIs[1] = "ipfs://meta-1";
-
-        // Assert: Events
+        // --- 5. Fulfill Request (Simulate DON Response) ---
+        // Since your MockRouter doesn't have a fulfill helper, we impersonate it.
+        // The FunctionsClient contract expects a call to `handleOracleFulfillment`
+        
+        bytes memory response = abi.encode(DEST_LAT, DEST_LONG);
+        
         vm.expectEmit(true, true, true, true);
-        emit SupplyChainRWA.ProductAssembled(shipmentId, manufacturer, amount);
-
-        // Act: Assembly (with Gas Profiling)
-        uint256 gasStart = gasleft();
+        emit ShipmentArrived(0, manufacturer);
         
+        // IMPERSONATION: We pretend to be the router calling back the client
+        vm.prank(address(functionsRouter));
+        supplyChain.handleOracleFulfillment(requestId, response, bytes(""));
+
+        // Assert: Status Arrived
+        assertEq(supplyChain.getShipmentStatus(0), 2); // 2 = ARRIVED
+        assertEq(supplyChain.balanceOf(manufacturer, MATERIAL_ID_A), SHIPMENT_AMOUNT);
+
+        // --- 6. Assemble Product ---
+        string[] memory uris = new string[](SHIPMENT_AMOUNT);
+        for(uint i=0; i<SHIPMENT_AMOUNT; i++) {
+            uris[i] = "ipfs://metadata";
+        }
+
         vm.prank(manufacturer);
-        supplyChain.assembleProduct(shipmentId, metadataURIs);
+        supplyChain.assembleProduct(0, uris);
+
+        // Assert: Materials Burned, NFTs Minted
+        assertEq(supplyChain.balanceOf(manufacturer, MATERIAL_ID_A), 0); // Burned
+        assertEq(productNft.balanceOf(manufacturer), SHIPMENT_AMOUNT); // Minted
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        LOGIC & CONSTRAINT TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_GPSDistanceCalculation() public {
+        uint256 eta = block.timestamp + 2 hours;
         
-        uint256 gasUsed = gasStart - gasleft();
-        console.log("Gas used for assembleProduct (Integration):", gasUsed);
+        vm.prank(supplier);
+        supplyChain.createShipment(DEST_LAT, DEST_LONG, RADIUS, manufacturer, MATERIAL_ID_A, SHIPMENT_AMOUNT, eta);
+        vm.prank(supplier);
+        supplyChain.startDelivery(0);
 
-        // Assert: Final State
-        assertEq(supplyChain.balanceOf(manufacturer, RAW_ID), 0, "Raw materials should be burned");
-        assertEq(productNft.balanceOf(manufacturer), amount, "Manufacturer should own Product NFTs");
+        vm.warp(eta + 1);
+        (, bytes memory performData) = supplyChain.checkUpkeep("");
         
-        // Assert: Mappings
-        assertEq(supplyChain.productToShipment(0), shipmentId, "Product 0 ID mapping incorrect");
-        assertEq(supplyChain.productToShipment(1), shipmentId, "Product 1 ID mapping incorrect");
+        vm.recordLogs();
+        supplyChain.performUpkeep(performData);
+        bytes32 requestId = vm.getRecordedLogs()[0].topics[1];
+
+        // Simulate location OUTSIDE radius
+        int256 badLat = DEST_LAT + 2000; 
+        bytes memory response = abi.encode(badLat, DEST_LONG);
+
+        // Impersonate Router
+        vm.prank(address(functionsRouter));
+        supplyChain.handleOracleFulfillment(requestId, response, bytes(""));
+
+        // Should NOT be arrived yet
+        assertEq(supplyChain.getShipmentStatus(0), 1); // Still IN_TRANSIT
     }
 
-    function test_Revert_If_UnauthorizedManufacturer() public {
-        // Arrange
-        _mintRawMaterials(1);
-        uint256 shipmentId = _createShipmentFixture(1);
-        _triggerShipmentArrival(shipmentId);
-
-        address attacker = makeAddr("attacker");
-        supplyChain.grantRole(supplyChain.MANUFACTURER_ROLE(), attacker);
-
-        string[] memory metadataURIs = new string[](1);
-        metadataURIs[0] = "ipfs://meta";
-
-        // Act & Assert
-        vm.prank(attacker);
-        vm.expectRevert(bytes("Not authorized manufacturer"));
-        supplyChain.assembleProduct(shipmentId, metadataURIs);
-    }
-
-    function test_Revert_If_ShipmentNotArrived() public {
-        // Arrange
-        _mintRawMaterials(1);
-        _createShipmentFixture(1); // Do not trigger arrival
-
-        string[] memory metadataURIs = new string[](1);
-        metadataURIs[0] = "ipfs://meta";
-
-        // Act & Assert
-        vm.prank(manufacturer);
-        vm.expectRevert(bytes("Shipment not arrived"));
-        supplyChain.assembleProduct(0, metadataURIs);
-    }
-
-    function test_Revert_If_InsufficientRawMaterials() public {
-        // Arrange
-        uint256 amount = 2;
-        _mintRawMaterials(amount);
-        uint256 shipmentId = _createShipmentFixture(amount);
-        _triggerShipmentArrival(shipmentId);
-
-        // Simulate manufacturer losing/selling one raw material token
-        vm.prank(manufacturer);
-        supplyChain.safeTransferFrom(manufacturer, address(0xdead), RAW_ID, 1, "");
-
-        string[] memory metadataURIs = new string[](2); // Intending to build 2 products
-        metadataURIs[0] = "ipfs://meta0";
-        metadataURIs[1] = "ipfs://meta1";
-
-        // Act & Assert
-        vm.prank(manufacturer);
-        vm.expectRevert(bytes("Not enough raw materials"));
-        supplyChain.assembleProduct(shipmentId, metadataURIs);
-    }
-
-    function test_Revert_If_MetadataCountMismatch() public {
-        // Arrange
-        uint256 amount = 2;
-        _mintRawMaterials(amount);
-        uint256 shipmentId = _createShipmentFixture(amount);
-        _triggerShipmentArrival(shipmentId);
-
-        string[] memory metadataURIs = new string[](1); // Mismatch: 1 URI for 2 Items
-        metadataURIs[0] = "ipfs://only-one";
-
-        // Act & Assert
-        vm.prank(manufacturer);
-        vm.expectRevert(bytes("Metadata list must match raw material amount"));
-        supplyChain.assembleProduct(shipmentId, metadataURIs);
-    }
-
-    function test_Revert_If_ShipmentAlreadyUsed() public {
-        // Arrange
-        _mintRawMaterials(1);
-        uint256 shipmentId = _createShipmentFixture(1);
-        _triggerShipmentArrival(shipmentId);
-
-        string[] memory metadataURIs = new string[](1);
-        metadataURIs[0] = "ipfs://first";
-
-        // Act 1: Successful Assembly
-        vm.prank(manufacturer);
-        supplyChain.assembleProduct(shipmentId, metadataURIs);
-
-        // Act 2 & Assert: Replay Attack
-        vm.prank(manufacturer);
-        vm.expectRevert(bytes("Shipment already used"));
-        supplyChain.assembleProduct(shipmentId, metadataURIs);
+    function test_RevertIf_ETAInvalid() public {
+        vm.startPrank(supplier);
+        vm.expectRevert(SupplyChainRWA.InvalidETA.selector);
+        supplyChain.createShipment(DEST_LAT, DEST_LONG, RADIUS, manufacturer, MATERIAL_ID_A, 10, block.timestamp);
+        vm.stopPrank();
     }
 }

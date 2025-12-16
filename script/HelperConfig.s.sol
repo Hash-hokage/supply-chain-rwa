@@ -6,7 +6,6 @@ import {MockRouter} from "test/mocks/MockRouter.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 
 contract HelperConfig is Script {
-    
     struct NetworkConfig {
         address router;
         address linkToken;
@@ -31,7 +30,7 @@ contract HelperConfig is Script {
             router: 0xb83E47C2bC239B3bf370bc41e1459A34b41238D0,
             linkToken: 0x514910771AF9Ca656af840dff83E8264EcF986CA,
             donId: bytes32(0x66756e2d657468657265756d2d6d61696e6e65742d3100000000000000000000), // Real DON ID
-            subId: 1234 
+            subId: 1234
         });
     }
 
@@ -41,17 +40,15 @@ contract HelperConfig is Script {
         }
 
         vm.startBroadcast();
-        
+
         MockRouter mockRouter = new MockRouter();
         ERC20Mock mockLink = new ERC20Mock(); // Standard OpenZeppelin Mock
-        
+
         vm.stopBroadcast();
 
-        return NetworkConfig({
-            router: address(mockRouter),
-            linkToken: address(mockLink),
-            donId: bytes32("donId"),
-            subId: 1
-        });
+        return
+            NetworkConfig({
+                router: address(mockRouter), linkToken: address(mockLink), donId: bytes32("donId"), subId: 1
+            });
     }
 }

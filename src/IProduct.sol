@@ -7,4 +7,6 @@ interface IProductNft {
 
 interface ISupplyChain {
     function buildMetadata(uint256 productId) external view returns (string memory);
+
+    function getShipmentStatus(uint256 shipmentId) external view returns (uint8);
 }
