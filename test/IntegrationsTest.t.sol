@@ -23,7 +23,7 @@ contract SupplyChainRWATest is Test {
     uint256 constant MATERIAL_ID_A = 1;
     uint256 constant MATERIAL_AMOUNT = 500;
     uint256 constant SHIPMENT_AMOUNT = 100;
-    
+
     // GPS Constants (scaled 1e6)
     int256 constant DEST_LAT = 40_712800; // NYC
     int256 constant DEST_LONG = -74_006000;
@@ -60,7 +60,7 @@ contract SupplyChainRWATest is Test {
         // 4. Mint Initial Materials to Supplier
         vm.prank(supplier);
         supplyChain.mint(supplier, MATERIAL_ID_A, MATERIAL_AMOUNT, "");
-        
+
         // Approve contract to handle materials
         vm.prank(supplier);
         supplyChain.setApprovalForAll(address(supplyChain), true);
@@ -72,21 +72,13 @@ contract SupplyChainRWATest is Test {
 
     function test_FullLifecycle_CreationToAssembly() public {
         uint256 eta = block.timestamp + 2 hours;
-        
+
         // --- 1. Create Shipment ---
         vm.prank(supplier);
         vm.expectEmit(true, true, true, true);
         emit ShipmentCreated(0, manufacturer, eta);
-        
-        supplyChain.createShipment(
-            DEST_LAT,
-            DEST_LONG,
-            RADIUS,
-            manufacturer,
-            MATERIAL_ID_A,
-            SHIPMENT_AMOUNT,
-            eta
-        );
+
+        supplyChain.createShipment(DEST_LAT, DEST_LONG, RADIUS, manufacturer, MATERIAL_ID_A, SHIPMENT_AMOUNT, eta);
 
         // --- 2. Start Delivery ---
         vm.prank(supplier);
@@ -97,12 +89,12 @@ contract SupplyChainRWATest is Test {
 
         (bool upkeepNeeded, bytes memory performData) = supplyChain.checkUpkeep("");
         assertTrue(upkeepNeeded);
-        
+
         // --- 4. Perform Upkeep (Triggers Chainlink Functions) ---
         vm.recordLogs();
         supplyChain.performUpkeep(performData);
         Vm.Log[] memory entries = vm.getRecordedLogs();
-        
+
         // Extract requestId from Your MockRouter's event
         // Event: RequestSent(bytes32 indexed id)
         // Topic 0: Keccak hash of signature, Topic 1: requestId
@@ -111,12 +103,12 @@ contract SupplyChainRWATest is Test {
         // --- 5. Fulfill Request (Simulate DON Response) ---
         // Since your MockRouter doesn't have a fulfill helper, we impersonate it.
         // The FunctionsClient contract expects a call to `handleOracleFulfillment`
-        
+
         bytes memory response = abi.encode(DEST_LAT, DEST_LONG);
-        
+
         vm.expectEmit(true, true, true, true);
         emit ShipmentArrived(0, manufacturer);
-        
+
         // IMPERSONATION: We pretend to be the router calling back the client
         vm.prank(address(functionsRouter));
         supplyChain.handleOracleFulfillment(requestId, response, bytes(""));
@@ -127,7 +119,7 @@ contract SupplyChainRWATest is Test {
 
         // --- 6. Assemble Product ---
         string[] memory uris = new string[](SHIPMENT_AMOUNT);
-        for(uint i=0; i<SHIPMENT_AMOUNT; i++) {
+        for (uint256 i = 0; i < SHIPMENT_AMOUNT; i++) {
             uris[i] = "ipfs://metadata";
         }
 
@@ -145,7 +137,7 @@ contract SupplyChainRWATest is Test {
 
     function test_GPSDistanceCalculation() public {
         uint256 eta = block.timestamp + 2 hours;
-        
+
         vm.prank(supplier);
         supplyChain.createShipment(DEST_LAT, DEST_LONG, RADIUS, manufacturer, MATERIAL_ID_A, SHIPMENT_AMOUNT, eta);
         vm.prank(supplier);
@@ -153,13 +145,13 @@ contract SupplyChainRWATest is Test {
 
         vm.warp(eta + 1);
         (, bytes memory performData) = supplyChain.checkUpkeep("");
-        
+
         vm.recordLogs();
         supplyChain.performUpkeep(performData);
         bytes32 requestId = vm.getRecordedLogs()[0].topics[1];
 
         // Simulate location OUTSIDE radius
-        int256 badLat = DEST_LAT + 2000; 
+        int256 badLat = DEST_LAT + 2000;
         bytes memory response = abi.encode(badLat, DEST_LONG);
 
         // Impersonate Router

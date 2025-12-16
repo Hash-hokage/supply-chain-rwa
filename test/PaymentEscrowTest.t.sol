@@ -22,29 +22,23 @@ contract PaymentEscrowTest is Test {
     uint256 constant PRICE = 1000 * 1e6; // 1000 USDC
     uint256 constant MATERIAL_ID = 1;
     uint256 constant SHIPMENT_ID = 0;
-    
+
     // GPS Constants
-    int256 constant DEST_LAT = 40_712800; 
+    int256 constant DEST_LAT = 40_712800;
     int256 constant DEST_LONG = -74_006000;
     uint256 constant RADIUS = 1000;
 
     function setUp() public {
         vm.startPrank(admin);
-        
+
         // 1. Deploy Infrastructure
         usdc = new MockUSDC();
         productNft = new MockProductNft();
         functionsRouter = new MockRouter();
 
         // 2. Deploy Supply Chain
-        supplyChain = new SupplyChainRWA(
-            "uri", 
-            address(productNft), 
-            address(functionsRouter), 
-            1, 
-            300000, 
-            bytes32("don-id")
-        );
+        supplyChain =
+            new SupplyChainRWA("uri", address(productNft), address(functionsRouter), 1, 300000, bytes32("don-id"));
         supplyChain.grantRole(supplyChain.SUPPLIER_ROLE(), supplier);
         supplyChain.grantRole(supplyChain.MANUFACTURER_ROLE(), manufacturer);
 
@@ -55,7 +49,7 @@ contract PaymentEscrowTest is Test {
 
         // 4. Setup Tokens
         usdc.mint(manufacturer, 100_000 * 1e6); // Manufacturer has funds
-        
+
         vm.prank(supplier);
         supplyChain.mint(supplier, MATERIAL_ID, 500, ""); // Supplier has goods
     }
@@ -87,7 +81,7 @@ contract PaymentEscrowTest is Test {
         // Check: Supplier got paid
         assertEq(usdc.balanceOf(supplier), PRICE);
         assertEq(usdc.balanceOf(address(escrow)), 0);
-        
+
         // Check State
         (,, uint256 amount, bool isFunded, bool isReleased, bool isRefunded) = escrow.escrowDetails(SHIPMENT_ID);
         assertTrue(isReleased);
@@ -107,7 +101,7 @@ contract PaymentEscrowTest is Test {
         // 3. Manufacturer decides to cancel/refund BEFORE arrival
         // (Assuming logic allows refund if not arrived, or if strict, requires cancellation flow.
         // Based on your contract: `refundEscrow` checks `status != 2 (ARRIVED)`)
-        
+
         vm.prank(manufacturer);
         escrow.refundEscrow(SHIPMENT_ID);
 
@@ -153,7 +147,7 @@ contract PaymentEscrowTest is Test {
 
     function test_RevertIf_DoubleRelease() public {
         _createShipmentHelper();
-        
+
         // Fund
         vm.startPrank(manufacturer);
         usdc.approve(address(escrow), PRICE);
@@ -181,13 +175,7 @@ contract PaymentEscrowTest is Test {
         vm.startPrank(supplier);
         supplyChain.setApprovalForAll(address(supplyChain), true);
         supplyChain.createShipment(
-            DEST_LAT, 
-            DEST_LONG, 
-            RADIUS, 
-            manufacturer, 
-            MATERIAL_ID, 
-            10, 
-            block.timestamp + 2 hours
+            DEST_LAT, DEST_LONG, RADIUS, manufacturer, MATERIAL_ID, 10, block.timestamp + 2 hours
         );
         supplyChain.startDelivery(SHIPMENT_ID);
         vm.stopPrank();
@@ -196,10 +184,10 @@ contract PaymentEscrowTest is Test {
     function _arriveShipmentHelper(uint256 id) internal {
         // Fast forward
         vm.warp(block.timestamp + 3 hours);
-        
+
         // Check Upkeep
         (, bytes memory performData) = supplyChain.checkUpkeep("");
-        
+
         // Perform Upkeep -> Capture Request
         vm.recordLogs();
         supplyChain.performUpkeep(performData);

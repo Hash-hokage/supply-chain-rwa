@@ -22,12 +22,7 @@ contract SupplyChainUnit is Test {
         functionsRouter = new MockRouter();
 
         supplyChain = new SupplyChainRWA(
-            "https://api.scm.com/",
-            address(productNft),
-            address(functionsRouter),
-            1,
-            300000,
-            bytes32("don-id")
+            "https://api.scm.com/", address(productNft), address(functionsRouter), 1, 300000, bytes32("don-id")
         );
         supplyChain.grantRole(supplyChain.SUPPLIER_ROLE(), supplier);
         supplyChain.grantRole(supplyChain.MANUFACTURER_ROLE(), manufacturer);
@@ -61,12 +56,12 @@ contract SupplyChainUnit is Test {
 
         vm.expectRevert(SupplyChainRWA.InvalidRadius.selector);
         supplyChain.createShipment(
-            40000000, 
-            -74000000, 
+            40000000,
+            -74000000,
             49, // Radius < 50
-            manufacturer, 
-            1, 
-            10, 
+            manufacturer,
+            1,
+            10,
             block.timestamp + 2 hours
         );
         vm.stopPrank();
@@ -79,15 +74,7 @@ contract SupplyChainUnit is Test {
 
         // ETA < 1 hour delay
         vm.expectRevert(SupplyChainRWA.InvalidETA.selector);
-        supplyChain.createShipment(
-            40000000, 
-            -74000000, 
-            100, 
-            manufacturer, 
-            1, 
-            10, 
-            block.timestamp + 30 minutes
-        );
+        supplyChain.createShipment(40000000, -74000000, 100, manufacturer, 1, 10, block.timestamp + 30 minutes);
         vm.stopPrank();
     }
 
@@ -99,20 +86,20 @@ contract SupplyChainUnit is Test {
         // Setup a fake finished product state to test metadata generation
         // This requires mocking the internal state or going through the full flow.
         // For unit tests, we'll do a quick flow.
-        
+
         // 1. Full Flow Short Circuit
         _quickShipAndAssemble();
 
         // 2. Check Metadata
         // Product ID 0 should exist
         string memory json = supplyChain.buildMetadata(0);
-        
+
         console2.log(json);
 
         // Assertions (Primitive string containment checks)
         assertTrue(_contains("Product #0", json));
-    assertTrue(_contains("Raw Material", json));
-    assertTrue(_contains("Shipment ID", json));
+        assertTrue(_contains("Raw Material", json));
+        assertTrue(_contains("Shipment ID", json));
     }
 
     // Helper for strings
@@ -125,9 +112,9 @@ contract SupplyChainUnit is Test {
 
         bytes32 whatHash = keccak256(whatBytes);
 
-        for (uint i = 0; i <= whereBytes.length - whatBytes.length; i++) {
+        for (uint256 i = 0; i <= whereBytes.length - whatBytes.length; i++) {
             bytes memory sub = new bytes(whatBytes.length);
-            for (uint j = 0; j < whatBytes.length; j++) {
+            for (uint256 j = 0; j < whatBytes.length; j++) {
                 sub[j] = whereBytes[i + j];
             }
             if (keccak256(sub) == whatHash) {

@@ -31,12 +31,7 @@ contract DeployStagnet is Script {
 
         // 3. Deploy SupplyChainRWA using the mock
         SupplyChainRWA supplyChain = new SupplyChainRWA(
-            "ipfs://QmRawMaterialBaseUri/",       
-            address(productNft),
-            address(mockRouter),                   
-            subId,
-            gasLimit,
-            donId
+            "ipfs://QmRawMaterialBaseUri/", address(productNft), address(mockRouter), subId, gasLimit, donId
         );
         console.log("SupplyChainRWA deployed at:", address(supplyChain));
 

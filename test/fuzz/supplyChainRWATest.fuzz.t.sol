@@ -18,14 +18,8 @@ contract SupplyChainFuzz is Test {
         productNft = new MockProductNft();
         functionsRouter = new MockRouter();
 
-        supplyChain = new SupplyChainRWA(
-            "uri",
-            address(productNft),
-            address(functionsRouter),
-            1,
-            300000,
-            bytes32("don-id")
-        );
+        supplyChain =
+            new SupplyChainRWA("uri", address(productNft), address(functionsRouter), 1, 300000, bytes32("don-id"));
         supplyChain.grantRole(supplyChain.SUPPLIER_ROLE(), supplier);
         supplyChain.grantRole(supplyChain.MANUFACTURER_ROLE(), manufacturer);
 
@@ -51,10 +45,10 @@ contract SupplyChainFuzz is Test {
         // 1. Bound inputs to reasonable/valid contract constraints
         // Radius: 50 to 10,000
         radius = bound(radius, 50, 10_000);
-        
+
         // Amount: 1 to 100 (Supplier has 1M)
         amount = bound(amount, 1, 100);
-        
+
         // ETA: 1 hour to 90 days
         etaOffset = bound(etaOffset, 1 hours, 90 days);
         uint256 eta = block.timestamp + etaOffset;
@@ -68,14 +62,14 @@ contract SupplyChainFuzz is Test {
         // 3. Assert Invariants
         // Supplier balance must decrease exactly by amount
         assertEq(supplyChain.balanceOf(supplier, 1), preBalance - amount);
-        
+
         // Contract balance must increase exactly by amount
         assertEq(supplyChain.balanceOf(address(supplyChain), 1), amount);
 
         // Check Shipment State
         uint256 id = 0; // First shipment is always 0 in this clean state
         (int256 sLat, int256 sLong, uint256 sRadius,,,,,,,) = supplyChain.shipments(id);
-        
+
         assertEq(sLat, lat);
         assertEq(sLong, long);
         assertEq(sRadius, radius);
@@ -84,11 +78,11 @@ contract SupplyChainFuzz is Test {
     // Test that invalid inputs ALWAYS revert
     function testFuzz_CreateShipment_RevertsOnInvalidRadius(uint256 radius) public {
         // Assume radius is OUTSIDE valid range
-        // Valid is 50 - 10,000. 
+        // Valid is 50 - 10,000.
         // We test 0-49 OR 10,001 - max
-        
+
         if (radius >= 50 && radius <= 10_000) return; // Skip valid ones
-        
+
         vm.startPrank(supplier);
         vm.expectRevert(SupplyChainRWA.InvalidRadius.selector);
         supplyChain.createShipment(0, 0, radius, manufacturer, 1, 10, block.timestamp + 2 hours);
@@ -108,7 +102,7 @@ contract SupplyChainFuzz is Test {
         // Manually trigger "performUpkeep" to generate a pending request
         vm.warp(block.timestamp + 2 hours + 1);
         (, bytes memory performData) = supplyChain.checkUpkeep("");
-        
+
         vm.recordLogs();
         supplyChain.performUpkeep(performData);
         Vm.Log[] memory entries = vm.getRecordedLogs();
@@ -118,15 +112,16 @@ contract SupplyChainFuzz is Test {
         // The contract calculates: (dLat^2 + dLong^2)
         // If dLat is MAX_INT, dLat^2 will overflow unless cast effectively.
         // We want to see if this reverts or behaves.
-        
+
         bytes memory response = abi.encode(oracleLat, oracleLong);
-        
+
         vm.prank(address(functionsRouter));
-        // We expect NO Panic (overflow/underflow). 
+        // We expect NO Panic (overflow/underflow).
         // It might revert with custom errors, or succeed, but not Panic code 0x11
         try supplyChain.handleOracleFulfillment(requestId, response, bytes("")) {
-            // Success or logical completion
-        } catch (bytes memory) {
+        // Success or logical completion
+        }
+            catch (bytes memory) {
             // Logic revert is fine, but we want to ensure contract handles it
         }
     }
