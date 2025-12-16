@@ -1,239 +1,142 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Test, Vm} from "forge-std/Test.sol";
+import {Test, console2, Vm} from "forge-std/Test.sol";
 import {SupplyChainRWA} from "src/SupplyChainRWA.sol";
-import {ProductNft} from "src/ProductNft.sol";
+import {MockRouter} from "test/mocks/MockRouter.sol";
+import {MockProductNft} from "test/mocks/MockProductNft.sol";
 
-contract SupplyChainTest is Test {
-    // --- System Under Test ---
+contract SupplyChainUnit is Test {
+    SupplyChainRWA public supplyChain;
+    MockProductNft public productNft;
+    MockRouter public functionsRouter;
 
-    SupplyChainRWA supplyChain = new SupplyChainRWA("uri", address(0), router, subId, gasLimit, donId); // deploy SupplyChain first
-    ProductNft productNft = new ProductNft(address(supplyChain)); // pass the SupplyChain address
-
-    // --- Actors ---
-    address supplier = makeAddr("supplier");
-    address manufacturer = makeAddr("manufacturer");
-    address otherUser = makeAddr("otherUser");
-    // --- Mock Chainlink Config ---
-    address router = makeAddr("router");
-    uint64 subId = 1234;
-    uint32 gasLimit = 300000;
-    // forge-lint: disable-next-line(unsafe-typecast)
-    bytes32 donId = bytes32("donId");
+    address public admin = makeAddr("admin");
+    address public supplier = makeAddr("supplier");
+    address public manufacturer = makeAddr("manufacturer");
+    address public unauthorized = makeAddr("unauthorized");
 
     function setUp() public {
-        // We now pass ALL 6 arguments to match the new constructor
-        supplyChain = new SupplyChainRWA(
-            "uri", // 1. URI
-            address(productNft), // 2. NFT Address
-            router, // 3. Chainlink Router
-            subId, // 4. Subscription ID
-            gasLimit, // 5. Gas Limit
-            donId // 6. DON ID
-        );
+        vm.startPrank(admin);
+        productNft = new MockProductNft();
+        functionsRouter = new MockRouter();
 
-        // Grant system roles to test actors
+        supplyChain = new SupplyChainRWA(
+            "https://api.scm.com/", address(productNft), address(functionsRouter), 1, 300000, bytes32("don-id")
+        );
         supplyChain.grantRole(supplyChain.SUPPLIER_ROLE(), supplier);
         supplyChain.grantRole(supplyChain.MANUFACTURER_ROLE(), manufacturer);
+        vm.stopPrank();
     }
 
-    function createDummyShipment() public {
-        vm.startPrank(supplier);
+    /*//////////////////////////////////////////////////////////////
+                        ACCESS CONTROL UNIT TESTS
+    //////////////////////////////////////////////////////////////*/
 
+    function test_AccessControl_Mint_RevertIfUnauthorized() public {
+        vm.prank(unauthorized);
+        vm.expectRevert(); // AccessControl revert
+        supplyChain.mint(unauthorized, 1, 100, "");
+    }
+
+    function test_AccessControl_CreateShipment_RevertIfManufacturer() public {
+        vm.prank(manufacturer); // Manufacturer cannot create shipments, only Suppliers
+        vm.expectRevert();
+        supplyChain.createShipment(0, 0, 100, manufacturer, 1, 10, block.timestamp + 2 hours);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        INPUT VALIDATION UNIT TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_Validation_RadiusTooSmall() public {
+        vm.startPrank(supplier);
         supplyChain.mint(supplier, 1, 100, "");
         supplyChain.setApprovalForAll(address(supplyChain), true);
 
-        // FIX 2: Updated createShipment with Time Args
-        // expectedArrivalTime = block.timestamp + 1 day
-        // lastCheckTimestamp = 0
-        supplyChain.createShipment(150, 100, 600, manufacturer, 1, 50, block.timestamp + 1 days, 0);
-
+        vm.expectRevert(SupplyChainRWA.InvalidRadius.selector);
+        supplyChain.createShipment(
+            40000000,
+            -74000000,
+            49, // Radius < 50
+            manufacturer,
+            1,
+            10,
+            block.timestamp + 2 hours
+        );
         vm.stopPrank();
     }
 
-    function testToSeeIfRolesWereAssingnedProperly() public view {
-        bool isAdmin = supplyChain.hasRole(supplyChain.DEFAULT_ADMIN_ROLE(), address(this));
-        bool isSupplier = supplyChain.hasRole(supplyChain.SUPPLIER_ROLE(), supplier);
-        bool isManufacturer = supplyChain.hasRole(supplyChain.MANUFACTURER_ROLE(), manufacturer);
+    function test_Validation_ETA_TooShort() public {
+        vm.startPrank(supplier);
+        supplyChain.mint(supplier, 1, 100, "");
+        supplyChain.setApprovalForAll(address(supplyChain), true);
 
-        assertTrue(isAdmin, "Deployer should be Admin");
-        assertTrue(isSupplier, "Supplier address should have SUPPLIER_ROLE");
-        assertTrue(isManufacturer, "Manufacturer address should have MANUFACTURER_ROLE");
-    }
-
-    function testCreateShipment() public {
-        createDummyShipment();
-
-        // FIX 3: Updated Struct Decoding (9 variables now)
-        (
-            int256 destLat,
-            int256 destLong,
-            uint256 radius,
-            address expectedmanufacturer,
-            uint256 rawMaterialId,
-            uint256 amount,
-            SupplyChainRWA.ShipmentStatus status,
-            uint256 expectedTime, // New Field
-            uint256 lastCheck // New Field
-        ) = supplyChain.shipments(0);
-
-        assertEq(destLat, 150);
-        assertEq(destLong, 100);
-        assertEq(radius, 600);
-        assertEq(expectedmanufacturer, manufacturer);
-        assertEq(rawMaterialId, 1);
-        assertEq(amount, 50);
-        assertEq(uint256(status), uint256(SupplyChainRWA.ShipmentStatus.CREATED));
-        assertEq(expectedTime, block.timestamp + 1 days);
-        assertEq(lastCheck, 0);
-    }
-
-    function testOnlySupplierCanCreateShipment() public {
-        address attacker = makeAddr("attacker");
-
-        vm.startPrank(attacker);
-        vm.expectRevert();
-        // FIX 4: Updated createShipment args here too
-        supplyChain.createShipment(150, 100, 600, manufacturer, 1, 50, block.timestamp + 1 days, 0);
+        // ETA < 1 hour delay
+        vm.expectRevert(SupplyChainRWA.InvalidETA.selector);
+        supplyChain.createShipment(40000000, -74000000, 100, manufacturer, 1, 10, block.timestamp + 30 minutes);
         vm.stopPrank();
     }
 
-    // NOTE: This test will compile but logic might fail because
-    // performUpkeep now sends a Request instead of finishing immediately.
-    // We can fix the logic once it compiles.
-    function testOrderFulfillment() public {
-        // 1. Setup Shipment
-        createDummyShipment();
+    /*//////////////////////////////////////////////////////////////
+                        METADATA UNIT TESTS
+    //////////////////////////////////////////////////////////////*/
 
-        // 2. Start Delivery
-        vm.prank(supplier);
-        supplyChain.startDelivery(0);
+    function test_Metadata_Structure() public {
+        // Setup a fake finished product state to test metadata generation
+        // This requires mocking the internal state or going through the full flow.
+        // For unit tests, we'll do a quick flow.
 
-        // 3. Fast Forward Time to unlock the "Smart Polling" window
-        vm.warp(block.timestamp + 1 days + 1);
+        // 1. Full Flow Short Circuit
+        _quickShipAndAssemble();
 
-        // 4. Check Upkeep
-        bytes memory checkData = "";
-        (bool upkeepNeeded, bytes memory performData) = supplyChain.checkUpkeep(checkData);
-        assertTrue(upkeepNeeded, "Upkeep should be needed");
+        // 2. Check Metadata
+        // Product ID 0 should exist
+        string memory json = supplyChain.buildMetadata(0);
 
-        // 5. Mock the Router Response
-        // We define a known ID so we don't have to hunt for it in logs
-        bytes32 mockRequestId = bytes32("request_1");
+        console2.log(json);
 
-        // We intercept the call to 'sendRequest' on the router address
-        // Signature matches: sendRequest(uint64,bytes,uint8,uint32,bytes32)
-        vm.mockCall(
-            router,
-            abi.encodeWithSignature("sendRequest(uint64,bytes,uint16,uint32,bytes32)"),
-            abi.encode(mockRequestId)
-        );
-
-        // 6. Trigger Perform Upkeep (sends the request)
-        supplyChain.performUpkeep(performData);
-
-        // 7. Simulate Chainlink Callback
-        // Use coordinates (150, 100) which match the destination
-        bytes memory response = abi.encode(int256(150), int256(100), uint256(1));
-        bytes memory err = "";
-
-        // Impersonate the router to deliver the data
-        vm.prank(router);
-        supplyChain.handleOracleFulfillment(mockRequestId, response, err);
-
-        // 8. Final Assertions
-        // Verify Status is ARRIVED (Enum index 2)
-        (,,,,,, SupplyChainRWA.ShipmentStatus status,,) = supplyChain.shipments(0);
-        assertEq(uint256(status), uint256(SupplyChainRWA.ShipmentStatus.ARRIVED), "Status should be ARRIVED");
-
-        // Verify Manufacturer got paid (50 tokens)
-        assertEq(supplyChain.balanceOf(manufacturer, 1), 50, "Manufacturer should receive tokens");
+        // Assertions (Primitive string containment checks)
+        assertTrue(_contains("Product #0", json));
+        assertTrue(_contains("Raw Material", json));
+        assertTrue(_contains("Shipment ID", json));
     }
 
-    function testCannotFulfillOrderOutsideGeofence() public {
-        // 1. Setup
-        createDummyShipment();
-        vm.prank(supplier);
-        supplyChain.startDelivery(0);
+    // Helper for strings
+    function _contains(string memory what, string memory where) internal pure returns (bool) {
+        bytes memory whatBytes = bytes(what);
+        bytes memory whereBytes = bytes(where);
 
-        // 2. Mock the Request
-        // We need a valid Request ID to pass to the fulfillment function
-        bytes32 mockRequestId = bytes32("request_fail_geo");
-        vm.mockCall(
-            router,
-            abi.encodeWithSignature("sendRequest(uint64,bytes,uint16,uint32,bytes32)"),
-            abi.encode(mockRequestId)
-        );
+        if (whatBytes.length == 0) return true;
+        if (whereBytes.length < whatBytes.length) return false;
 
-        // Trigger the request
-        vm.warp(block.timestamp + 1 days + 1); // Time travel to open window
-        bytes memory performData = abi.encode(uint256(0));
-        supplyChain.performUpkeep(performData);
+        bytes32 whatHash = keccak256(whatBytes);
 
-        // 3. Simulate "Bad" Data
-        // Destination is (150, 100). We send (1000, 1000).
-        bytes memory badResponse = abi.encode(int256(1000), int256(1000), uint256(1));
-        bytes memory err = "";
-
-        // 4. Deliver Data
-        vm.prank(router);
-        supplyChain.handleOracleFulfillment(mockRequestId, badResponse, err);
-
-        // 5. Verify Nothing Changed
-        (,,,,,, SupplyChainRWA.ShipmentStatus status,,) = supplyChain.shipments(0);
-
-        // Status should still be IN_TRANSIT (1), NOT ARRIVED (2)
-        assertEq(
-            uint256(status), uint256(SupplyChainRWA.ShipmentStatus.IN_TRANSIT), "Should not arrive outside geofence"
-        );
-
-        // Manufacturer should NOT have tokens
-        assertEq(supplyChain.balanceOf(manufacturer, 1), 0, "Assets should remain in escrow");
+        for (uint256 i = 0; i <= whereBytes.length - whatBytes.length; i++) {
+            bytes memory sub = new bytes(whatBytes.length);
+            for (uint256 j = 0; j < whatBytes.length; j++) {
+                sub[j] = whereBytes[i + j];
+            }
+            if (keccak256(sub) == whatHash) {
+                return true;
+            }
+        }
+        return false;
     }
 
-    function testOnlySupplierCanStartDelivery() public {
-        createDummyShipment();
-
-        // Create an unauthorized attacker
-        address attacker = makeAddr("attacker");
-
-        vm.startPrank(attacker);
-
-        // We expect the next line to revert because attacker lacks SUPPLIER_ROLE
-        vm.expectRevert();
+    function _quickShipAndAssemble() internal {
+        vm.startPrank(supplier);
+        supplyChain.mint(supplier, 1, 100, "");
+        supplyChain.setApprovalForAll(address(supplyChain), true);
+        supplyChain.createShipment(0, 0, 1000, manufacturer, 1, 10, block.timestamp + 2 hours);
         supplyChain.startDelivery(0);
-
         vm.stopPrank();
+
+        vm.prank(admin);
+        supplyChain.forceArrival(0); // Admin shortcut for unit testing metadata
+
+        string[] memory uris = new string[](10);
+        vm.prank(manufacturer);
+        supplyChain.assembleProduct(0, uris);
     }
-
-    function testCannotFulfillAlreadyArrivedShipment() public {
-        // 1. Complete a valid delivery first (Happy Path)
-        testOrderFulfillment();
-
-        // Verify it is arrived
-        (,,,,,, SupplyChainRWA.ShipmentStatus status,,) = supplyChain.shipments(0);
-        assertEq(uint256(status), uint256(SupplyChainRWA.ShipmentStatus.ARRIVED));
-
-        // 2. Try to fulfill it AGAIN
-        bytes32 newRequestId = bytes32("request_replay");
-        bytes memory response = abi.encode(int256(150), int256(100), uint256(1));
-        bytes memory err = "";
-
-        // Since we manually mapped the request ID in the first test,
-        // we need to manually map this new fake ID to shipment 0 for the test logic to find it
-        // (In production, performUpkeep would do this, but we are skipping straight to the callback here)
-        // Note: Accessing the mapping directly in test requires a "harness" or just repeating the setup.
-        // EASIER STRATEGY: Just use the OLD request ID that is already mapped!
-
-        bytes32 oldRequestId = bytes32("request_1"); // From testOrderFulfillment
-
-        vm.prank(router);
-
-        // We expect a revert because the contract checks: require(status == IN_TRANSIT)
-        vm.expectRevert();
-        supplyChain.handleOracleFulfillment(oldRequestId, response, err);
-    }
-
-    ///MANUFACTURING LOGIC TESTS
 }

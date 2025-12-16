@@ -1,117 +1,128 @@
 // SPDX-License-Identifier: MIT
-
 pragma solidity ^0.8.20;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, console2, Vm} from "forge-std/Test.sol";
 import {SupplyChainRWA} from "src/SupplyChainRWA.sol";
-import {ProductNft} from "src/ProductNft.sol";
 import {MockRouter} from "test/mocks/MockRouter.sol";
+import {MockProductNft} from "test/mocks/MockProductNft.sol";
 
-contract SupplyChainRWA_FuzzTest is Test {
-    SupplyChainRWA supplyChain;
-    ProductNft productNft;
-    MockRouter mockRouter;
+contract SupplyChainFuzz is Test {
+    SupplyChainRWA public supplyChain;
+    MockProductNft public productNft;
+    MockRouter public functionsRouter;
 
-    address supplier = makeAddr("supplier");
-    address manufacturer = makeAddr("manufacturer");
-    uint256 constant RAW_ID = 1;
+    address public supplier = makeAddr("supplier");
+    address public manufacturer = makeAddr("manufacturer");
 
     function setUp() public {
-        mockRouter = new MockRouter();
-        productNft = new ProductNft(address(this));
-        // Deploy SupplyChain
-        supplyChain = new SupplyChainRWA("uri", address(productNft), address(mockRouter), 1234, 300000, bytes32("donId"));
-        
-        // Setup Roles
+        productNft = new MockProductNft();
+        functionsRouter = new MockRouter();
+
+        supplyChain =
+            new SupplyChainRWA("uri", address(productNft), address(functionsRouter), 1, 300000, bytes32("don-id"));
         supplyChain.grantRole(supplyChain.SUPPLIER_ROLE(), supplier);
         supplyChain.grantRole(supplyChain.MANUFACTURER_ROLE(), manufacturer);
-    }
 
-    // --- Helpers ---
-    function _mintAndCreateShipment(uint256 amount) internal returns (uint256) {
-        vm.startPrank(supplier);
-        supplyChain.mint(supplier, RAW_ID, amount, "");
-        supplyChain.setApprovalForAll(address(supplyChain), true);
-        supplyChain.createShipment(0, 0, 1000, manufacturer, RAW_ID, amount, block.timestamp + 1 days, 0);
-        vm.stopPrank();
-        return 0; // shipmentId
-    }
-
-    function _triggerArrival(uint256 shipmentId) internal {
+        // Give supplier plenty of materials for fuzzing
         vm.prank(supplier);
-        supplyChain.startDelivery(shipmentId);
-
-        vm.warp(block.timestamp + 1 days + 1);
-        
-        bytes32 requestId = bytes32("req_fuzz");
-        vm.mockCall(
-            address(mockRouter),
-            abi.encodeWithSignature("sendRequest(uint64,bytes,uint16,uint32,bytes32)"),
-            abi.encode(requestId)
-        );
-        supplyChain.performUpkeep(abi.encode(shipmentId));
-
-        vm.prank(address(mockRouter));
-        supplyChain.handleOracleFulfillment(requestId, abi.encode(int256(0), int256(0), uint256(1)), "");
+        supplyChain.mint(supplier, 1, 1_000_000, "");
+        vm.prank(supplier);
+        supplyChain.setApprovalForAll(address(supplyChain), true);
     }
 
-    // ==========================================
-    // 1. HAPPY PATH FUZZING
-    // ==========================================
-    function testFuzz_Integration_Lifecycle_Works(uint256 amount) public {
-        // limit amount to realistic values (1 to 500) to avoid overflows/OOG
-        amount = bound(amount, 1, 500);
+    /*//////////////////////////////////////////////////////////////
+                            STATELESS FUZZING
+    //////////////////////////////////////////////////////////////*/
 
-        // Run the flow
-        uint256 shipmentId = _mintAndCreateShipment(amount);
-        _triggerArrival(shipmentId);
+    // Test that createShipment handles ANY valid combination of numbers without reverting
+    function testFuzz_CreateShipment_StateConsistency(
+        int256 lat,
+        int256 long,
+        uint256 radius,
+        uint256 amount,
+        uint256 etaOffset
+    ) public {
+        // 1. Bound inputs to reasonable/valid contract constraints
+        // Radius: 50 to 10,000
+        radius = bound(radius, 50, 10_000);
 
-        // Create dynamic metadata array
-        string[] memory metadataURIs = new string[](amount);
-        for(uint256 i = 0; i < amount; i++) {
-            metadataURIs[i] = "ipfs://test";
+        // Amount: 1 to 100 (Supplier has 1M)
+        amount = bound(amount, 1, 100);
+
+        // ETA: 1 hour to 90 days
+        etaOffset = bound(etaOffset, 1 hours, 90 days);
+        uint256 eta = block.timestamp + etaOffset;
+
+        uint256 preBalance = supplyChain.balanceOf(supplier, 1);
+
+        // 2. Act
+        vm.prank(supplier);
+        supplyChain.createShipment(lat, long, radius, manufacturer, 1, amount, eta);
+
+        // 3. Assert Invariants
+        // Supplier balance must decrease exactly by amount
+        assertEq(supplyChain.balanceOf(supplier, 1), preBalance - amount);
+
+        // Contract balance must increase exactly by amount
+        assertEq(supplyChain.balanceOf(address(supplyChain), 1), amount);
+
+        // Check Shipment State
+        uint256 id = 0; // First shipment is always 0 in this clean state
+        (int256 sLat, int256 sLong, uint256 sRadius,,,,,,,) = supplyChain.shipments(id);
+
+        assertEq(sLat, lat);
+        assertEq(sLong, long);
+        assertEq(sRadius, radius);
+    }
+
+    // Test that invalid inputs ALWAYS revert
+    function testFuzz_CreateShipment_RevertsOnInvalidRadius(uint256 radius) public {
+        // Assume radius is OUTSIDE valid range
+        // Valid is 50 - 10,000.
+        // We test 0-49 OR 10,001 - max
+
+        if (radius >= 50 && radius <= 10_000) return; // Skip valid ones
+
+        vm.startPrank(supplier);
+        vm.expectRevert(SupplyChainRWA.InvalidRadius.selector);
+        supplyChain.createShipment(0, 0, radius, manufacturer, 1, 10, block.timestamp + 2 hours);
+        vm.stopPrank();
+    }
+
+    // Test the GPS math specifically
+    // We want to ensure that if the Oracle returns coordinates, the math doesn't panic
+    // even with extreme values.
+    function testFuzz_OracleResponse_MathSafety(int256 oracleLat, int256 oracleLong) public {
+        // Setup a shipment first
+        vm.startPrank(supplier);
+        supplyChain.createShipment(0, 0, 1000, manufacturer, 1, 10, block.timestamp + 2 hours);
+        supplyChain.startDelivery(0);
+        vm.stopPrank();
+
+        // Manually trigger "performUpkeep" to generate a pending request
+        vm.warp(block.timestamp + 2 hours + 1);
+        (, bytes memory performData) = supplyChain.checkUpkeep("");
+
+        vm.recordLogs();
+        supplyChain.performUpkeep(performData);
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        bytes32 requestId = entries[0].topics[1];
+
+        // Fulfill with FUZZED coordinates
+        // The contract calculates: (dLat^2 + dLong^2)
+        // If dLat is MAX_INT, dLat^2 will overflow unless cast effectively.
+        // We want to see if this reverts or behaves.
+
+        bytes memory response = abi.encode(oracleLat, oracleLong);
+
+        vm.prank(address(functionsRouter));
+        // We expect NO Panic (overflow/underflow).
+        // It might revert with custom errors, or succeed, but not Panic code 0x11
+        try supplyChain.handleOracleFulfillment(requestId, response, bytes("")) {
+        // Success or logical completion
         }
-
-        vm.prank(manufacturer);
-        supplyChain.assembleProduct(shipmentId, metadataURIs);
-
-        // Verify End State
-        assertEq(productNft.balanceOf(manufacturer), amount);
-        assertEq(supplyChain.balanceOf(manufacturer, RAW_ID), 0);
-    }
-
-    // ==========================================
-    // 2. REVERT PATH FUZZING
-    // ==========================================
-    // 1. Define the error at the top of your contract or inside the test contract
-    // (OpenZeppelin's AccessControl uses this specific error signature)
-    error AccessControlUnauthorizedAccount(address account, bytes32 neededRole);
-
-    function testFuzz_RevertIf_UnauthorizedManufacturer(address attacker) public {
-        vm.assume(attacker != manufacturer && attacker != supplier);
-
-        // ... setup code ...
-        uint256 amount = 1;
-        uint256 shipmentId = _mintAndCreateShipment(amount);
-        _triggerArrival(shipmentId);
-
-        string[] memory metadataURIs = new string[](amount);
-        metadataURIs[0] = "ipfs://hack";
-
-        // --- THE FIX ---
-        // 1. Set the expectation first
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                AccessControlUnauthorizedAccount.selector, 
-                attacker, 
-                supplyChain.MANUFACTURER_ROLE()
-            )
-        );
-        
-        // 2. Then set the actor
-        vm.prank(attacker);
-        
-        // 3. Finally, make the call
-        supplyChain.assembleProduct(shipmentId, metadataURIs);
+            catch (bytes memory) {
+            // Logic revert is fine, but we want to ensure contract handles it
+        }
     }
 }

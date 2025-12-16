@@ -31,7 +31,7 @@ contract InteractStagnet is Script {
         // 4. Create a Live Shipment
         // Params: Lat: 150, Long: 100, Radius: 600, Receiver: Deployer, ID: 1, Amount: 50
         // Expected Arrival: Now + 1 hour
-        supplyChain.createShipment(150, 100, 600, deployer, 1, 50, block.timestamp + 1 hours, 0);
+        supplyChain.createShipment(150, 100, 600, deployer, 1, 50, block.timestamp + 1 hours);
         console.log("Shipment #0 created successfully!");
         console.log("Waiting for block confirmation... (Mainnet Replay ~12s)");
 
