@@ -32,7 +32,7 @@ contract DeploySystem is Script {
         PaymentEscrow escrow = new PaymentEscrow(address(supplyChain), paymentToken);
 
         productNft.setSupplyChain(address(supplyChain));
-        productNft.transferOwnership(address(supplyChain));
+        //productNft.transferOwnership(address(supplyChain));
 
         vm.stopBroadcast();
 
