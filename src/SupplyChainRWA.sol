@@ -62,7 +62,7 @@ contract SupplyChainRWA is
     uint256 public constant MAX_CONCURRENT_SHIPMENTS = 500;
     uint256 public constant MAX_MATERIALS_PER_PRODUCT = 10;
     uint256 public constant GPS_CHECK_COOLDOWN = 15 minutes;
-    uint256 public constant FORCE_ARRIVAL_DELAY = 24 hours;
+    uint256 public constant FORCE_ARRIVAL_DELAY = 0;
     uint8 public constant MAX_GPS_CHECKS = 5;
 
     /*//////////////////////////////////////////////////////////////
@@ -437,5 +437,19 @@ contract SupplyChainRWA is
         returns (bool)
     {
         return super.supportsInterface(interfaceId);
+    }
+
+    // ==========================================
+    //      HACKATHON DEMO / DEBUG HELPERS
+    // ==========================================
+    // @notice These functions are for the Hackathon Demo ONLY.
+    // @dev allowing permissionless role entry for judges/testers.
+
+    function demoJoinAsSupplier() external {
+        _grantRole(SUPPLIER_ROLE, msg.sender);
+    }
+
+    function demoJoinAsManufacturer() external {
+        _grantRole(MANUFACTURER_ROLE, msg.sender);
     }
 }

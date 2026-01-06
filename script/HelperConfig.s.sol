@@ -39,16 +39,16 @@ contract HelperConfig is Script {
             return activeNetworkConfig;
         }
 
-        vm.startBroadcast();
-
         MockRouter mockRouter = new MockRouter();
         ERC20Mock mockLink = new ERC20Mock(); // Standard OpenZeppelin Mock
-
-        vm.stopBroadcast();
 
         return
             NetworkConfig({
                 router: address(mockRouter), linkToken: address(mockLink), donId: bytes32("donId"), subId: 1
             });
+    }
+
+    function getActiveNetworkConfig() public view returns (NetworkConfig memory) {
+        return activeNetworkConfig;
     }
 }
