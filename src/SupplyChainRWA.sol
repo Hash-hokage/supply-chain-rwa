@@ -62,7 +62,7 @@ contract SupplyChainRWA is
     uint256 public constant MAX_CONCURRENT_SHIPMENTS = 500;
     uint256 public constant MAX_MATERIALS_PER_PRODUCT = 10;
     uint256 public constant GPS_CHECK_COOLDOWN = 15 minutes;
-    uint256 public constant FORCE_ARRIVAL_DELAY = 24 hours;
+    uint256 public constant FORCE_ARRIVAL_DELAY = 1 minutes;
     uint8 public constant MAX_GPS_CHECKS = 5;
 
     /*//////////////////////////////////////////////////////////////
